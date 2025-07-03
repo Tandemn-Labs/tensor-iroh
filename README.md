@@ -4,6 +4,7 @@ Goal is to create a light-weight Iroh Python Bindings acting as a general purpos
 
 Currently the script has experimental/monkey-patched code that works for Tandemn's use-case.
 
+```
 ┌─────────────────┐    HTTP     ┌─────────────────┐
 │  Central Server │◄─────────────┤   Web Client    │
 │   (FastAPI)     │──────────────►│   (Browser)     │
@@ -22,6 +23,7 @@ Currently the script has experimental/monkey-patched code that works for Tandemn
 │Peer1│ │Peer2│ │Peer3│
 │Embed│ │Trans│ │Output│
 └─────┘ └────┘ └─────┘
+```
 
 **System Design Summary**
 
