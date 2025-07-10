@@ -1,0 +1,48 @@
+namespace tensor_protocol {
+  TensorNode create_node(string? storage_path);
+};
+
+[Error]
+interface TensorError {
+  Io(string message);
+  Serialization(string message);
+  Connection(string message);
+  Protocol(string message);
+};
+
+dictionary TensorMetadata {
+  sequence<i64> shape;
+  string dtype;
+  boolean requires_grad;
+};
+
+dictionary TensorData {
+  TensorMetadata metadata;
+  bytes data;
+};
+
+interface TensorNode {
+  constructor(string? storage_path);
+  
+  [Async, Throws=TensorError]
+  void start();
+  
+  [Async, Throws=TensorError]
+  void send_tensor_direct(string peer_addr, string tensor_name, TensorData tensor);
+  
+  [Async, Throws=TensorError]
+  TensorData? receive_tensor();
+  
+  [Async, Throws=TensorError]
+  string get_node_addr();
+  
+  [Throws=TensorError]
+  void register_tensor(string name, TensorData tensor);
+  
+  [Throws=TensorError]
+  void shutdown();
+};
+
+callback interface TensorReceiveCallback {
+  void on_tensor_received(string peer_id, string tensor_name, TensorData tensor);
+}; 

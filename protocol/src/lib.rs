@@ -1,192 +1,354 @@
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use iroh_net::{Endpoint, NodeAddr};
-use iroh_net::key::SecretKey;
-use tokio::io::{AsyncReadExt, AsyncWriteExt}; 
-use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
 use anyhow::Result;
+use iroh::{Endpoint, NodeAddr};
+use iroh::endpoint::Connection;
+use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use iroh::endpoint::{BindError, ConnectError, ConnectionError, WriteError};
+use iroh_base::ticket::{NodeTicket, ParseError};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tokio::sync::{mpsc};
+use tracing::{debug, error, info, warn};
+use iroh::Watcher;
+uniffi::setup_scaffolding!();
 
-// 1. --- FFI Bridge Setup ---
-// This macro and the UDL file are what UniFFI uses to generate the
-// Python-to-Rust bridge code.
-uniffi::include_scaffolding!("tensor_protocol");
+// ALPN for our tensor protocol
+const TENSOR_ALPN: &[u8] = b"tensor-iroh/direct/0";
 
-// 2. --- Protocol Message Definition ---
-// This defines the "language" our nodes will speak to each other.
-// It's a simple enum that can represent metadata, data chunks, or the end of a stream.
-#[derive(Serialize, Deserialize, Debug)]
-enum Message {
-    Header(TensorMetadata),
-    DataChunk(Vec<u8>),
-    End,
+// Error types
+#[derive(Debug, Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum TensorError {
+    #[error("IO error: {message}")]
+    Io { message: String },
+    #[error("Serialization error: {message}")]
+    Serialization { message: String },
+    #[error("Connection error: {message}")]
+    Connection { message: String },
+    #[error("Protocol error: {message}")]
+    Protocol { message: String },
 }
 
-// Metadata about the tensor being sent.
-#[derive(Serialize, Deserialize, Debug, uniffi::Record)]
+impl From<anyhow::Error> for TensorError {
+    fn from(err: anyhow::Error) -> Self {
+        TensorError::Protocol {
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<std::io::Error> for TensorError {
+    fn from(err: std::io::Error) -> Self {
+        TensorError::Io {
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<postcard::Error> for TensorError {
+    fn from(err: postcard::Error) -> Self {
+        TensorError::Serialization {
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<quinn::WriteError> for TensorError {
+    fn from(err: quinn::WriteError) -> Self {
+        TensorError::Io {
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<WriteError> for TensorError {
+    fn from(err: WriteError) -> Self {
+        TensorError::Io {
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<ConnectionError> for TensorError {
+    fn from(err: ConnectionError) -> Self {
+        TensorError::Connection {
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<ParseError> for TensorError {
+    fn from(err: ParseError) -> Self {
+        TensorError::Connection {
+            message: err.to_string(),
+        }
+    }
+}
+
+// Data structures
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
 pub struct TensorMetadata {
-    pub name: String,
+    pub shape: Vec<i64>,
     pub dtype: String,
-    pub shape: Vec<u64>,
+    pub requires_grad: bool,
 }
 
-// 3. --- Callback for Receiving Tensors in Python ---
-// This defines a "trait" or "interface" that a Python object must implement.
-// Our Rust code will call the `on_tensor` method when it successfully receives a tensor.
-#[uniffi::export(with_foreign)]
-pub trait TensorCallback: Send + Sync {
-    fn on_tensor(&self, metadata: TensorMetadata, data: Vec<u8>);
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+pub struct TensorData {
+    pub metadata: TensorMetadata,
+    pub data: Vec<u8>,
 }
 
+// Protocol message types
+#[derive(Debug, Serialize, Deserialize)]
+enum TensorMessage {
+    Request { tensor_name: String },
+    Response { tensor_name: String, data: TensorData },
+    Error { message: String },
+}
 
-// 4. --- The Core Node Object ---
-// This is the main object Python will interact with. It holds the Iroh endpoint
-// and all the logic for sending and receiving.
+// Protocol handler for incoming tensor requests
+#[derive(Debug, Clone)]
+struct TensorProtocolHandler {
+    tensor_store: Arc<Mutex<HashMap<String, TensorData>>>,
+    receiver_tx: Arc<Mutex<Option<mpsc::UnboundedSender<(String, String, TensorData)>>>>,
+}
+
+impl TensorProtocolHandler {
+    fn new() -> Self {
+        Self {
+            tensor_store: Arc::new(Mutex::new(HashMap::new())),
+            receiver_tx: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn set_receiver(&self, tx: mpsc::UnboundedSender<(String, String, TensorData)>) {
+        *self.receiver_tx.lock().unwrap() = Some(tx);
+    }
+
+    fn register_tensor(&self, name: String, tensor: TensorData) {
+        self.tensor_store.lock().unwrap().insert(name, tensor);
+    }
+}
+
+impl ProtocolHandler for TensorProtocolHandler {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let peer_id = connection.remote_node_id()?.to_string();
+        debug!("Accepted tensor connection from {}", peer_id);
+
+        let (mut send, mut recv) = connection.accept_bi().await?;
+
+        // Read the request message
+        // let request_bytes = recv.read_to_end(1024).await?;
+        let request_bytes = recv.read_to_end(1024).await.map_err(AcceptError::from_err)?;
+        let message: TensorMessage = postcard::from_bytes(&request_bytes)
+            .map_err(|e| AcceptError::from_err(e))?;
+
+        match message {
+            TensorMessage::Request { tensor_name } => {
+                debug!("Received request for tensor: {}", tensor_name);
+
+                let response = {
+                    let store = self.tensor_store.lock().unwrap();
+                    match store.get(&tensor_name) {
+                        Some(tensor_data) => TensorMessage::Response {
+                            tensor_name: tensor_name.clone(),
+                            data: tensor_data.clone(),
+                        },
+                        None => TensorMessage::Error {
+                            message: format!("Tensor '{}' not found", tensor_name),
+                        },
+                    }
+                };
+
+                // Send response
+                let response_bytes = postcard::to_allocvec(&response)
+                    .map_err(|e| AcceptError::from_err(e))?;
+                // send.write_all(&response_bytes).await?;
+                send.write_all(&response_bytes).await.map_err(AcceptError::from_err)?;
+                send.finish().map_err(AcceptError::from_err)?;
+            }
+            TensorMessage::Response { tensor_name, data } => {
+                // This is an incoming tensor from a peer
+                debug!("Received tensor data: {}", tensor_name);
+                
+                if let Some(tx) = self.receiver_tx.lock().unwrap().as_ref() {
+                    let _ = tx.send((peer_id, tensor_name, data));
+                }
+            }
+            TensorMessage::Error { message } => {
+                warn!("Received error from peer: {}", message);
+            }
+        }
+
+        connection.closed().await;
+        Ok(())
+    }
+}
+
+// Main TensorNode implementation
 #[derive(uniffi::Object)]
 pub struct TensorNode {
-    // We wrap the endpoint in an Arc<Mutex<Option<...>>> to allow it to be
-    // initialized asynchronously after the object is created.
     endpoint: Arc<Mutex<Option<Endpoint>>>,
+    router: Arc<Mutex<Option<Router>>>,
+    handler: Arc<TensorProtocolHandler>,
+    receiver_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<(String, String, TensorData)>>>>,
 }
 
 #[uniffi::export]
 impl TensorNode {
-    // The constructor is simple: it just creates the placeholder.
     #[uniffi::constructor]
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+    pub fn new(_storage_path: Option<String>) -> Self {
+        let handler = Arc::new(TensorProtocolHandler::new());
+        let (tx, rx) = mpsc::unbounded_channel();
+        handler.set_receiver(tx);
+
+        Self {
             endpoint: Arc::new(Mutex::new(None)),
-        })
+            router: Arc::new(Mutex::new(None)),
+            handler,
+            receiver_rx: Arc::new(Mutex::new(Some(rx))),
+        }
     }
 
-    // Starts the underlying Iroh node, binding to a random port.
-    // pub async fn start(&self) -> Result<(), anyhow::Error> {
-    pub async fn start(&self) -> Result<()> {
-        let mut endpoint_guard = self.endpoint.lock().await;
-        if endpoint_guard.is_some() {
-            return Ok(()); // Already started
-        }
-        let secret_key = SecretKey::generate();
+    #[uniffi::method(async_runtime = "tokio")]
+    pub async fn start(&self) -> Result<(), TensorError> {
+        info!("Starting tensor node...");
+
+        // Create endpoint
+        // this is the official doc example, so use it 
         let endpoint = Endpoint::builder()
-            .secret_key(secret_key)
-            .bind() // Bind to a random available port
-            .await?;
-        *endpoint_guard = Some(endpoint);
+            .discovery_n0()
+            .bind()
+            .await
+            .map_err(|e: BindError| {
+                TensorError::Connection { message: e.to_string() }
+            })?;
+
+        
+
+        // Create router with our protocol handler
+        let router = Router::builder(endpoint.clone())
+            .accept(TENSOR_ALPN, self.handler.clone())
+            .spawn();
+
+        // Store references using interior mutability
+        *self.endpoint.lock().unwrap() = Some(endpoint);
+        *self.router.lock().unwrap() = Some(router);
+
+        info!("Tensor node started successfully");
         Ok(())
     }
 
-    // Returns the unique NodeId and addresses of this node, needed for others to connect.
-    // pub async fn node_addr(&self) -> Result<String, anyhow::Error> {
-    pub async fn node_addr(&self) -> Result<String> {
-        let endpoint_guard = self.endpoint.lock().await;
-        let endpoint = endpoint_guard.as_ref().ok_or_else(|| anyhow::anyhow!("Node not started"))?;
-        let addr = endpoint.node_addr().await?;
-        Ok(addr.to_string())
-    }
-
-    // The "server" part. This listens for incoming tensor streams.
-    // pub async fn listen(&self, callback: Arc<dyn TensorCallback>) -> Result<(), anyhow::Error> {
-    pub async fn listen(&self, callback: Arc<dyn TensorCallback>) -> Result<()> {
-        let endpoint_guard = self.endpoint.lock().await;
-        let endpoint = endpoint_guard.clone().ok_or_else(|| anyhow::anyhow!("Node not started"))?;
-
-        // Spawn a background task to accept incoming connections.
-        tokio::spawn(async move {
-            // The ALPN identifies our specific protocol.
-            while let Some(connecting) = endpoint.accept(b"tensor-iroh/0.1").await {
-                let callback = callback.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_incoming_stream(connecting, callback).await {
-                        // In a real app, you'd use a logging framework like `tracing`.
-                        println!("[ERROR] Failed to handle incoming stream: {:?}", e);
-                    }
-                });
-            }
-        });
-
-        Ok(())
-    }
-
-    // The "client" part. This connects to a peer and sends a tensor.
-    pub async fn send_tensor(   
+    #[uniffi::method(async_runtime = "tokio")]
+    pub async fn send_tensor_direct(
         &self,
-        peer_addr_str: String,
-        metadata: TensorMetadata,
-        data: Vec<u8>,
-    ) -> Result<()> {
-        let endpoint_guard = self.endpoint.lock().await;
-        let endpoint = endpoint_guard.as_ref().ok_or_else(|| anyhow::anyhow!("Node not started"))?;
+        peer_addr: String,
+        tensor_name: String,
+        tensor: TensorData,
+    ) -> Result<(), TensorError> {
+        let endpoint = {
+            let endpoint_guard = self.endpoint.lock().unwrap();
+            endpoint_guard.as_ref()
+                .ok_or_else(|| TensorError::Protocol { message: "Node not started".to_string() })?
+                .clone()
+        };
 
-        // Parse the peer's address string into a NodeAddr.
-        let peer_addr: iroh_net::NodeAddr = peer_addr_str.parse()?;
+        debug!("Sending tensor '{}' to {}", tensor_name, peer_addr);
 
-        // Establish a direct QUIC connection.
-        let connection = endpoint.connect(peer_addr, b"tensor-iroh/0.1").await?;
-        let (mut send_stream, _recv_stream) = connection.open_bi().await?;
+        // Parse peer address
+        let ticket: NodeTicket = peer_addr.parse()?;
+        let node_addr: NodeAddr = ticket.into();
 
-        // 1. Send the header.
-        let header_bytes = postcard::to_stdvec(&Message::Header(metadata))?;
-        send_stream.write_all(&(header_bytes.len() as u32).to_be_bytes()).await?;
-        send_stream.write_all(&header_bytes).await?;
+        // Connect to peer
+        let connection = endpoint.connect(node_addr, TENSOR_ALPN).await
+            .map_err(|e: ConnectError| {TensorError::Connection { message: e.to_string() }})?;
 
-        // 2. Send the data in chunks.
-        for chunk in data.chunks(16 * 1024) { // 16KB chunks
-            let chunk_bytes = postcard::to_stdvec(&Message::DataChunk(chunk.to_vec()))?;
-            send_stream.write_all(&(chunk_bytes.len() as u32).to_be_bytes()).await?;
-            send_stream.write_all(&chunk_bytes).await?;
+
+        // Open stream and send tensor
+        let (mut send, mut _recv) = connection.open_bi().await?;
+
+        // Send the tensor data directly as a response message
+        let message = TensorMessage::Response {
+            tensor_name: tensor_name.clone(),
+            data: tensor,
+        };
+
+        let message_bytes = postcard::to_allocvec(&message)?;
+        send.write_all(&message_bytes).await?;
+        send.finish().map_err(|e| TensorError::Connection { message: e.to_string() })?;
+
+        debug!("Tensor '{}' sent successfully", tensor_name);
+        Ok(())
+    }
+
+    #[uniffi::method(async_runtime = "tokio")]
+    pub async fn receive_tensor(&self) -> Result<Option<TensorData>, TensorError> {
+        let mut receiver_guard = self.receiver_rx.lock().unwrap();
+        if let Some(rx) = receiver_guard.as_mut() {
+            match rx.try_recv() {
+                Ok((peer_id, tensor_name, tensor_data)) => {
+                    debug!("Received tensor '{}' from {}", tensor_name, peer_id);
+                    Ok(Some(tensor_data))
+                }
+                Err(mpsc::error::TryRecvError::Empty) => Ok(None),
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    Err(TensorError::Protocol { message: "Receiver disconnected".to_string() })
+                }
+            }
+        } else {
+            Err(TensorError::Protocol { message: "Node not started".to_string() })
         }
+    }
 
-        // 3. Send the end message.
-        let end_bytes = postcard::to_stdvec(&Message::End)?;
-        send_stream.write_all(&(end_bytes.len() as u32).to_be_bytes()).await?;
-        send_stream.write_all(&end_bytes).await?;
+    #[uniffi::method(async_runtime = "tokio")]
+    pub async fn get_node_addr(&self) -> Result<String, TensorError> {
+        let endpoint = {
+            let endpoint_guard = self.endpoint.lock().unwrap();
+            endpoint_guard.as_ref()
+                .ok_or_else(|| TensorError::Protocol {
+                    message: "Node not started".into(),
+                })?
+                .clone()
+        };
+        // the following is the official doc example, so use it 
+        // we need to get the node addr from the endpoint
+        // this is not a future?
+        let result = endpoint.node_addr().initialized().await
+            .map_err(|_err| TensorError::Protocol { message: "Discovery watcher error".into() })?;
+        
+        let addr = result.relay_url.ok_or_else(|| TensorError::Protocol { message: "Address not available".into() })?;
 
-        // Gracefully close the sending side of the stream.
-        send_stream.finish().await?;
+        Ok(format!("{:?}", addr))
+    }
 
+    #[uniffi::method]
+    pub fn register_tensor(&self, name: String, tensor: TensorData) -> Result<(), TensorError> {
+        debug!("Registering tensor: {}", name);
+        self.handler.register_tensor(name, tensor);
+        Ok(())
+    }
+
+    #[uniffi::method]
+    pub fn shutdown(&self) -> Result<(), TensorError> {
+        info!("Shutting down tensor node...");
+        // Router will be dropped automatically, triggering shutdown
         Ok(())
     }
 }
 
+// Free function for creating nodes
+#[uniffi::export]
+pub fn create_node(_storage_path: Option<String>) -> TensorNode {
+    TensorNode::new(_storage_path)
+}
 
-// 5. --- Stream Handling Logic ---
-// This helper function runs in its own task for each new connection.
-async fn handle_incoming_stream(
-    connecting: iroh_net::Connecting,
-    callback: Arc<dyn TensorCallback>,
-) -> Result<()> {
-    let connection = connecting.await?;
-    let (_send_stream, mut recv_stream) = connection.accept_bi().await?;
-
-    let mut tensor_data: Vec<u8> = Vec::new();
-    let mut tensor_metadata: Option<TensorMetadata> = None;
-
-    loop {
-        // Read the 4-byte length prefix.
-        let mut len_buf = [0u8; 4];
-        recv_stream.read_exact(&mut len_buf).await?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-
-        // Read the message payload.
-        let mut msg_buf = vec![0u8; len];
-        recv_stream.read_exact(&mut msg_buf).await?;
-        let message: Message = postcard::from_bytes(&msg_buf)?;
-
-        match message {
-            Message::Header(metadata) => {
-                tensor_metadata = Some(metadata);
-            }
-            Message::DataChunk(chunk) => {
-                tensor_data.extend_from_slice(&chunk);
-            }
-            Message::End => {
-                if let Some(metadata) = tensor_metadata {
-                    // We have the complete tensor, so we trigger the callback.
-                    callback.on_tensor(metadata, tensor_data);
-                }
-                break; // End of stream.
-            }
-        }
-    }
-
-    Ok(())
+// Callback trait for receiving tensors
+#[uniffi::export(with_foreign)]
+pub trait TensorReceiveCallback: Send + Sync + 'static {
+    fn on_tensor_received(&self, peer_id: String, tensor_name: String, tensor: TensorData);
 } 
