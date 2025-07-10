@@ -48,8 +48,9 @@ const TENSOR_ALPN: &[u8] = b"tensor-iroh/direct/0";
 
 // This defines all the possible error types our program might encounter
 // It's like creating a list of all the different ways a delivery could fail
-#[derive(Debug, Error, uniffi::Error)]
-#[uniffi(flat_error)]  // Tells UniFFI how to expose this to other languages
+#[derive(Debug, Error, uniffi::Error)] // Debug allows us to print the error, Error makes a 
+// custom error type, uniffi::Error makes it compatible with UniFFI and allows export to other languages
+#[uniffi(flat_error)]  // Tells UniFFI how to expose this to other languages (flat is to avoid nested structs)
 pub enum TensorError {
     #[error("IO error: {message}")]           // Network or file problems
     Io { message: String },
@@ -130,7 +131,11 @@ impl From<ParseError> for TensorError {
 
 // This describes the "shape" and properties of a tensor (like an AI model's data)
 // Think of it like a label on a box that tells you what's inside
-#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+// these are a part of the Public Facing API. It allows us to define the shape and properties of a tensor
+// and then use it to send and receive tensors.
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)] // Debug allows us to print the struct,
+// Clone allows us to copy it, Serialize and Deserialize allow us to convert it to and from bytes,
+// uniffi::Record allows us to export it to other languages
 pub struct TensorMetadata {
     pub shape: Vec<i64>,        // The dimensions (e.g., [3, 224, 224] for a 3-channel 224x224 image)
     pub dtype: String,          // The data type (e.g., "float32", "int64")
@@ -151,14 +156,15 @@ pub struct TensorData {
 
 // These are the different types of messages our protocol can send
 // It's like defining the different types of letters you can send in the mail
-#[derive(Debug, Serialize, Deserialize)]
+// This is an internal type that is not exposed to the public facing API.
+#[derive(Debug, Serialize, Deserialize)] // Debug allows us to print the struct,
+// Serialize and Deserialize allow us to convert it to and from bytes
+// Clone is missing here because it will be BIG to copy a BIG tensor(expensive af)
 enum TensorMessage {
     // A request asking for a specific tensor by name
     Request { tensor_name: String },
-    
     // A response containing the requested tensor data
     Response { tensor_name: String, data: TensorData },
-    
     // An error message when something goes wrong
     Error { message: String },
 }
@@ -172,7 +178,9 @@ enum TensorMessage {
 #[derive(Debug, Clone)]
 struct TensorProtocolHandler {
     // A thread-safe storage for tensors (like a filing cabinet)
-    tensor_store: Arc<Mutex<HashMap<String, TensorData>>>,
+    tensor_store: Arc<Mutex<HashMap<String, TensorData>>>, // this is literally where the data lives
+    // it is a thread safe hashmap that is used to store the tensors. 
+    // hashmap because the speed of retrieval is O(1)
     
     // A way to send received tensors to the main application
     // Think of it like a conveyor belt that delivers incoming packages
@@ -213,10 +221,12 @@ impl ProtocolHandler for TensorProtocolHandler {
         let (mut send, mut recv) = connection.accept_bi().await?;
 
         // Read the incoming message (up to 1024 bytes)
+        // this part is GOOD for control plane (not much bytes)
         let request_bytes = recv.read_to_end(1024).await.map_err(AcceptError::from_err)?;
         
         // Convert the raw bytes back into a TensorMessage using postcard
         // This is like opening an envelope and reading the letter inside
+        // this part is GOOD for control plane (not much bytes)
         let message: TensorMessage = postcard::from_bytes(&request_bytes)
             .map_err(|e| AcceptError::from_err(e))?;
 
