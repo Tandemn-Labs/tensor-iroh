@@ -18,8 +18,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Obtain their addresses
     let addr1 = node1.get_node_addr().await?;
     let addr2 = node2.get_node_addr().await?;
-    println!("Node1 address: {}", addr1);
-    println!("Node2 address: {}", addr2);
+    println!("Node1 NodeTicket: {}", addr1);
+    println!("Node2 NodeTicket: {}", addr2);
 
     // Construct a test tensor: shape [3,4], float32, deterministic data
     let shape = vec![3, 4];
@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Registering tensor on node1...");
     node1.register_tensor("test_tensor".to_string(), tensor.clone())?;
 
-    // Send the tensor from node1 to node2
+    // Send the tensor from node1 to node2 using the NodeTicket
     println!("Sending tensor from node1 to node2...");
     node1.send_tensor_direct(addr2.clone(), "test_tensor".to_string(), tensor.clone()).await?;
 
