@@ -420,17 +420,17 @@ impl TensorNode {
     #[uniffi::method(async_runtime = "tokio")]
     pub async fn send_tensor_direct(
         &self,
-        peer_addr: String,      // The address of the peer (like a mailing address)
+        peer_addr: String,      // The NodeTicket of the peer (contains all addressing info)
         tensor_name: String,    // A name for the tensor
         tensor: TensorData,     // The actual tensor data
     ) -> Result<(), TensorError> {
         println!("📤 [SEND] Sending tensor '{}' to {} (size: {} bytes)", tensor_name, peer_addr, tensor.data.len());
         
-        println!("🔒 [SEND] Acquiring endpoint lock...");
+        // println!("🔒 [SEND] Acquiring endpoint lock...");
         // Get our endpoint (make sure we're started)
         let endpoint = {
             let endpoint_guard = self.endpoint.lock().unwrap();
-            println!("🔒 [SEND] Endpoint lock acquired");
+            // println!("🔒 [SEND] Endpoint lock acquired");
             
             endpoint_guard.as_ref()
                 .ok_or_else(|| {
@@ -440,23 +440,27 @@ impl TensorNode {
                 .clone()
         };
         
-        println!("✅ [SEND] Endpoint acquired successfully");
+        // println!("✅ [SEND] Endpoint acquired successfully");
 
         debug!("Sending tensor '{}' to {}", tensor_name, peer_addr);
 
-        println!("🔍 [SEND] Parsing peer address: {}", peer_addr);
-        // Parse the peer address from a string into a NodeAddr
-        // This is like converting a written address into GPS coordinates
+        println!("🔍 [SEND] Parsing peer NodeTicket: {}", peer_addr);
+        // ✅ FIX: Parse as NodeTicket instead of expecting a specific format
+        // This automatically handles both relay URLs and direct addresses
         let ticket: NodeTicket = peer_addr.parse().map_err(|e| {
-            println!("❌ [SEND] Failed to parse peer address: {:?}", e);
+            println!("❌ [SEND] Failed to parse NodeTicket: {:?}", e);
             e
         })?;
         let node_addr: NodeAddr = ticket.into();
-        println!("✅ [SEND] Peer address parsed successfully");
+        
+        println!("✅ [SEND] NodeTicket parsed successfully");
+        // println!("🔍 [SEND] Peer node_id: {}", node_addr.node_id.fmt_short());
+        // println!("🔍 [SEND] Peer relay_url: {:?}", node_addr.relay_url);
+        // println!("🔍 [SEND] Peer direct_addresses: {} found", node_addr.direct_addresses.len());
 
-        println!("🔗 [SEND] Connecting to peer...");
+        // println!("🔗 [SEND] Connecting to peer...");
         // Connect to the peer
-        // This is like making a phone call to the other peer
+        // Iroh will automatically try both relay and direct addresses
         let connection = endpoint.connect(node_addr, TENSOR_ALPN).await
             .map_err(|e: ConnectError| {
                 println!("❌ [SEND] Connection failed: {}", e);
@@ -474,7 +478,7 @@ impl TensorNode {
         
         println!("✅ [SEND] Bidirectional stream opened");
 
-        println!("📦 [SEND] Creating message...");
+        // println!("📦 [SEND] Creating message...");
         // Create a message containing our tensor
         let message = TensorMessage::Response {
             tensor_name: tensor_name.clone(),
@@ -490,7 +494,7 @@ impl TensorNode {
         
         println!("✅ [SEND] Message serialized successfully (size: {} bytes)", message_bytes.len());
         
-        println!("📡 [SEND] Writing message bytes to stream...");
+        // println!("📡 [SEND] Writing message bytes to stream...");
         // Send the bytes over the network
         send.write_all(&message_bytes).await.map_err(|e| {
             println!("❌ [SEND] Failed to write message bytes: {:?}", e);
@@ -514,9 +518,9 @@ impl TensorNode {
     pub async fn receive_tensor(&self) -> Result<Option<TensorData>, TensorError> {
         println!("📬 [RECEIVE] Checking for received tensors...");
         
-        println!("🔒 [RECEIVE] Acquiring receiver lock...");
+        // println!("🔒 [RECEIVE] Acquiring receiver lock...");
         let mut receiver_guard = self.receiver_rx.lock().unwrap();
-        println!("🔒 [RECEIVE] Receiver lock acquired");
+        // println!("🔒 [RECEIVE] Receiver lock acquired");
         
         if let Some(rx) = receiver_guard.as_mut() {
             println!("✅ [RECEIVE] Receiver channel found, trying to receive...");
@@ -574,25 +578,33 @@ impl TensorNode {
             })?;
         
         println!("✅ [GET_ADDR] Got initialized result: {:?}", result);
-        println!("🔍 [GET_ADDR] Checking relay_url...");
-        println!("🔍 [GET_ADDR] relay_url is_some: {}", result.relay_url.is_some());
+        // println!("🔍 [GET_ADDR] Checking addresses...");
+        // println!("🔍 [GET_ADDR] relay_url is_some: {}", result.relay_url.is_some());
+        // println!("🔍 [GET_ADDR] direct_addresses count: {}", result.direct_addresses.len());
         
         if let Some(ref relay_url) = result.relay_url {
             println!("✅ [GET_ADDR] Found relay_url: {:?}", relay_url);
-        } else {
-            println!("❌ [GET_ADDR] relay_url is None!");
-            println!("🔍 [GET_ADDR] Full result details: {:#?}", result);
         }
         
-        // Extract the relay URL (this is how other peers can reach us)
-        let addr = result.relay_url.ok_or_else(|| {
-            println!("❌ [GET_ADDR] Address not available - relay_url is None");
-            TensorError::Protocol { message: "Address not available".into() }
-        })?;
-
-        let addr_string = format!("{:?}", addr);
-        println!("🎉 [GET_ADDR] Successfully got address: {}", addr_string);
-        Ok(addr_string)
+        for (i, direct_addr) in result.direct_addresses.iter().enumerate() {
+            println!("✅ [GET_ADDR] Direct address {}: {}", i, direct_addr);
+        }
+        
+        // ✅ FIX: Create a proper NodeTicket with ALL address info (relay + direct)
+        // This works whether we have relay servers, direct addresses, or both!
+        if result.relay_url.is_none() && result.direct_addresses.is_empty() {
+            println!("❌ [GET_ADDR] No addressing information available");
+            return Err(TensorError::Protocol { 
+                message: "No relay URL or direct addresses available".into() 
+            });
+        }
+        
+        // Create a NodeTicket containing the complete addressing information
+        let node_ticket = NodeTicket::new(result);
+        let ticket_string = node_ticket.to_string();
+        
+        println!("🎉 [GET_ADDR] Created NodeTicket: {}", ticket_string);
+        Ok(ticket_string)
     }
 
     // Stores a tensor locally so others can request it (like putting something in storage)
