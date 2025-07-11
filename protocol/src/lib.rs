@@ -426,11 +426,11 @@ impl TensorNode {
     ) -> Result<(), TensorError> {
         println!("📤 [SEND] Sending tensor '{}' to {} (size: {} bytes)", tensor_name, peer_addr, tensor.data.len());
         
-        println!("🔒 [SEND] Acquiring endpoint lock...");
+        // println!("🔒 [SEND] Acquiring endpoint lock...");
         // Get our endpoint (make sure we're started)
         let endpoint = {
             let endpoint_guard = self.endpoint.lock().unwrap();
-            println!("🔒 [SEND] Endpoint lock acquired");
+            // println!("🔒 [SEND] Endpoint lock acquired");
             
             endpoint_guard.as_ref()
                 .ok_or_else(|| {
@@ -440,7 +440,7 @@ impl TensorNode {
                 .clone()
         };
         
-        println!("✅ [SEND] Endpoint acquired successfully");
+        // println!("✅ [SEND] Endpoint acquired successfully");
 
         debug!("Sending tensor '{}' to {}", tensor_name, peer_addr);
 
@@ -454,11 +454,11 @@ impl TensorNode {
         let node_addr: NodeAddr = ticket.into();
         
         println!("✅ [SEND] NodeTicket parsed successfully");
-        println!("🔍 [SEND] Peer node_id: {}", node_addr.node_id.fmt_short());
-        println!("🔍 [SEND] Peer relay_url: {:?}", node_addr.relay_url);
-        println!("🔍 [SEND] Peer direct_addresses: {} found", node_addr.direct_addresses.len());
+        // println!("🔍 [SEND] Peer node_id: {}", node_addr.node_id.fmt_short());
+        // println!("🔍 [SEND] Peer relay_url: {:?}", node_addr.relay_url);
+        // println!("🔍 [SEND] Peer direct_addresses: {} found", node_addr.direct_addresses.len());
 
-        println!("🔗 [SEND] Connecting to peer...");
+        // println!("🔗 [SEND] Connecting to peer...");
         // Connect to the peer
         // Iroh will automatically try both relay and direct addresses
         let connection = endpoint.connect(node_addr, TENSOR_ALPN).await
@@ -478,7 +478,7 @@ impl TensorNode {
         
         println!("✅ [SEND] Bidirectional stream opened");
 
-        println!("📦 [SEND] Creating message...");
+        // println!("📦 [SEND] Creating message...");
         // Create a message containing our tensor
         let message = TensorMessage::Response {
             tensor_name: tensor_name.clone(),
@@ -494,7 +494,7 @@ impl TensorNode {
         
         println!("✅ [SEND] Message serialized successfully (size: {} bytes)", message_bytes.len());
         
-        println!("📡 [SEND] Writing message bytes to stream...");
+        // println!("📡 [SEND] Writing message bytes to stream...");
         // Send the bytes over the network
         send.write_all(&message_bytes).await.map_err(|e| {
             println!("❌ [SEND] Failed to write message bytes: {:?}", e);
@@ -518,9 +518,9 @@ impl TensorNode {
     pub async fn receive_tensor(&self) -> Result<Option<TensorData>, TensorError> {
         println!("📬 [RECEIVE] Checking for received tensors...");
         
-        println!("🔒 [RECEIVE] Acquiring receiver lock...");
+        // println!("🔒 [RECEIVE] Acquiring receiver lock...");
         let mut receiver_guard = self.receiver_rx.lock().unwrap();
-        println!("🔒 [RECEIVE] Receiver lock acquired");
+        // println!("🔒 [RECEIVE] Receiver lock acquired");
         
         if let Some(rx) = receiver_guard.as_mut() {
             println!("✅ [RECEIVE] Receiver channel found, trying to receive...");
@@ -578,9 +578,9 @@ impl TensorNode {
             })?;
         
         println!("✅ [GET_ADDR] Got initialized result: {:?}", result);
-        println!("🔍 [GET_ADDR] Checking addresses...");
-        println!("🔍 [GET_ADDR] relay_url is_some: {}", result.relay_url.is_some());
-        println!("🔍 [GET_ADDR] direct_addresses count: {}", result.direct_addresses.len());
+        // println!("🔍 [GET_ADDR] Checking addresses...");
+        // println!("🔍 [GET_ADDR] relay_url is_some: {}", result.relay_url.is_some());
+        // println!("🔍 [GET_ADDR] direct_addresses count: {}", result.direct_addresses.len());
         
         if let Some(ref relay_url) = result.relay_url {
             println!("✅ [GET_ADDR] Found relay_url: {:?}", relay_url);
