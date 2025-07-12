@@ -41,6 +41,8 @@ uniffi::setup_scaffolding!();
 // This is like a "protocol ID" - it tells other computers what kind of data we're sending
 // Think of it like saying "I speak Tensor Protocol version 0" when connecting
 const TENSOR_ALPN: &[u8] = b"tensor-iroh/direct/0";
+const MAX_MESSAGE_SIZE: usize = 100 * 1024 * 1024; // 100MB limit to prevent memory exhaustion
+
 
 // ============================================================================
 // ERROR TYPES - All the different ways things can go wrong
@@ -226,10 +228,10 @@ impl ProtocolHandler for TensorProtocolHandler {
         let (mut send, mut recv) = connection.accept_bi().await?;
         println!("✅ [ACCEPT] Bidirectional stream established");
 
-        println!("📥 [ACCEPT] Reading incoming message (max 1024 bytes)...");
-        // Read the incoming message (up to 1024 bytes)
-        // this part is GOOD for control plane (not much bytes)
-        let request_bytes = recv.read_to_end(1024).await.map_err(AcceptError::from_err)?;
+        println!("📥 [ACCEPT] Reading incoming message (max 100MB)...");
+        // Read the incoming message dynamically with size limit
+        // iroh-quinn's read_to_end takes a size_limit parameter and returns Vec<u8>
+        let request_bytes = recv.read_to_end(MAX_MESSAGE_SIZE).await.map_err(AcceptError::from_err)?;
         println!("✅ [ACCEPT] Read {} bytes from peer", request_bytes.len());
         
         println!("🗜️ [ACCEPT] Deserializing message with postcard...");
