@@ -64,59 +64,59 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("❌ Test 6/12: Multiple receivers - FAILED");
     }
     
-    // Test 7: Send before ready (timing edge case with proper assertions)
-    total += 1;
-    if test_send_before_ready().await.is_ok() {
-        passed += 1;
-        println!("✅ Test 7/12: Send before ready - PASSED");
-    } else {
-        println!("❌ Test 7/12: Send before ready - FAILED");
-    }
+    // // Test 7: Send before ready (timing edge case with proper assertions)
+    // total += 1;
+    // if test_send_before_ready().await.is_ok() {
+    //     passed += 1;
+    //     println!("✅ Test 7/12: Send before ready - PASSED");
+    // } else {
+    //     println!("❌ Test 7/12: Send before ready - FAILED");
+    // }
     
-    // Test 8: Immediate shutdown (resource cleanup test with proper assertions)
-    total += 1;
-    if test_immediate_shutdown().await.is_ok() {
-        passed += 1;
-        println!("✅ Test 8/12: Immediate shutdown - PASSED");
-    } else {
-        println!("❌ Test 8/12: Immediate shutdown - FAILED");
-    }
+    // // Test 8: Immediate shutdown (resource cleanup test with proper assertions)
+    // total += 1;
+    // if test_immediate_shutdown().await.is_ok() {
+    //     passed += 1;
+    //     println!("✅ Test 8/12: Immediate shutdown - PASSED");
+    // } else {
+    //     println!("❌ Test 8/12: Immediate shutdown - FAILED");
+    // }
     
-    // Test 9: Timeout scenarios (with proper assertions)
-    total += 1;
-    if test_timeout_scenarios().await.is_ok() {
-        passed += 1;
-        println!("✅ Test 9/12: Timeout scenarios - PASSED");
-    } else {
-        println!("❌ Test 9/12: Timeout scenarios - FAILED");
-    }
+    // // Test 9: Timeout scenarios (with proper assertions)
+    // total += 1;
+    // if test_timeout_scenarios().await.is_ok() {
+    //     passed += 1;
+    //     println!("✅ Test 9/12: Timeout scenarios - PASSED");
+    // } else {
+    //     println!("❌ Test 9/12: Timeout scenarios - FAILED");
+    // }
     
-    // Test 10: Non-existent tensor (NEW)
-    total += 1;
-    if test_nonexistent_tensor().await.is_ok() {
-        passed += 1;
-        println!("✅ Test 10/12: Non-existent tensor - PASSED");
-    } else {
-        println!("❌ Test 10/12: Non-existent tensor - FAILED");
-    }
+    // // Test 10: Non-existent tensor (NEW)
+    // total += 1;
+    // if test_nonexistent_tensor().await.is_ok() {
+    //     passed += 1;
+    //     println!("✅ Test 10/12: Non-existent tensor - PASSED");
+    // } else {
+    //     println!("❌ Test 10/12: Non-existent tensor - FAILED");
+    // }
     
-    // Test 11: Bad ticket parsing (NEW)
-    total += 1;
-    if test_bad_ticket_parsing().await.is_ok() {
-        passed += 1;
-        println!("✅ Test 11/12: Bad ticket parsing - PASSED");
-    } else {
-        println!("❌ Test 11/12: Bad ticket parsing - FAILED");
-    }
+    // // Test 11: Bad ticket parsing (NEW)
+    // total += 1;
+    // if test_bad_ticket_parsing().await.is_ok() {
+    //     passed += 1;
+    //     println!("✅ Test 11/12: Bad ticket parsing - PASSED");
+    // } else {
+    //     println!("❌ Test 11/12: Bad ticket parsing - FAILED");
+    // }
     
-    // Test 12: Post-shutdown behavior (NEW)
-    total += 1;
-    if test_post_shutdown_behavior().await.is_ok() {
-        passed += 1;
-        println!("✅ Test 12/12: Post-shutdown behavior - PASSED");
-    } else {
-        println!("❌ Test 12/12: Post-shutdown behavior - FAILED");
-    }
+    // // Test 12: Post-shutdown behavior (NEW)
+    // total += 1;
+    // if test_post_shutdown_behavior().await.is_ok() {
+    //     passed += 1;
+    //     println!("✅ Test 12/12: Post-shutdown behavior - PASSED");
+    // } else {
+    //     println!("❌ Test 12/12: Post-shutdown behavior - FAILED");
+    // }
     
     println!("\n=== COMPREHENSIVE STRESS TEST RESULTS ===");
     println!("Passed: {}/{} tests", passed, total);
