@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 # Core Iroh dependencies
@@ -25,6 +25,9 @@ postcard = { version = "1.0", features = ["alloc"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
+# Compression
+flate2 = "1.0"
+
 # Logging
 tracing = "0.1"
 quinn = "0.11.8"
@@ -35,3 +38,22 @@ uniffi = { version = "0.28", features = ["build", "tokio"] }
 
 [features]
 default = [] 
+
+# Development profile optimizations for faster compilation
+[profile.dev]
+opt-level = 0           # No optimizations
+debug = true            # Include debug info
+split-debuginfo = "unpacked"  # Faster debug builds on some systems
+incremental = true      # Enable incremental compilation
+
+# Fast development profile (compromise between speed and performance)
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 1           # Minimal optimizations
+overflow-checks = false # Skip overflow checks
+
+# Release profile (keep optimized)
+[profile.release]
+opt-level = 3           # Full optimizations
+debug = false           # No debug info
+lto = true             # Link-time optimization 

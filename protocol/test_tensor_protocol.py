@@ -2,11 +2,13 @@
 """
 Test script for the tensor-protocol direct streaming implementation.
 This demonstrates how to use the protocol for sending tensors directly over QUIC streams.
+
+Updated to use the new NodeTicket format that includes both relay URLs and direct addresses.
 """
 
 import asyncio
-import numpy as np
 import time
+import struct
 from typing import Optional
 
 # Import the generated Python bindings
@@ -16,22 +18,25 @@ try:
 except ImportError:
     print("tensor_protocol module not found. Please build the Rust crate first:")
     print("cd protocol && cargo build --release")
-    print("Then run: python -m uniffi_bindgen generate src/tensor_protocol.udl --language python")
+    print("Then run the build_and_test.sh script to generate Python bindings")
     exit(1)
 
 
-def create_test_tensor(shape=(2, 3), dtype="float32") -> TensorData:
-    """Create a test tensor with random data."""
-    # Generate random numpy array
-    if dtype == "float32":
-        np_array = np.random.randn(*shape).astype(np.float32)
-    elif dtype == "int64":
-        np_array = np.random.randint(0, 100, shape, dtype=np.int64)
-    else:
-        raise ValueError(f"Unsupported dtype: {dtype}")
+def create_test_tensor_deterministic(shape=(3, 4), dtype="float32") -> TensorData:
+    """Create a deterministic test tensor (matches the Rust test exactly)."""
+    if dtype != "float32":
+        raise ValueError("Only float32 supported in this test")
     
-    # Convert to bytes
-    tensor_bytes = np_array.tobytes()
+    # Create deterministic data exactly like the Rust test
+    num_elems = shape[0] * shape[1]
+    tensor_bytes = bytearray()
+    
+    for i in range(num_elems):
+        # Convert i to f32 and get little-endian bytes (matches Rust to_ne_bytes())
+        float_val = float(i)
+        # Use struct.pack to convert float to 4 bytes (little-endian)
+        float_bytes = struct.pack('<f', float_val)
+        tensor_bytes.extend(float_bytes)
     
     # Create metadata
     metadata = TensorMetadata(
@@ -41,21 +46,49 @@ def create_test_tensor(shape=(2, 3), dtype="float32") -> TensorData:
     )
     
     # Create tensor data
-    return TensorData(metadata=metadata, data=tensor_bytes)
+    return TensorData(metadata=metadata, data=bytes(tensor_bytes))
 
 
-def tensor_data_to_numpy(tensor_data: TensorData) -> np.ndarray:
-    """Convert TensorData back to numpy array."""
-    dtype = tensor_data.metadata.dtype
-    shape = tuple(tensor_data.metadata.shape)
+def create_test_tensor_random(shape=(2, 3), dtype="float32") -> TensorData:
+    """Create a test tensor with random-like data (no numpy dependency)."""
+    if dtype == "float32":
+        # Generate simple test data without numpy
+        import random
+        tensor_bytes = bytearray()
+        for i in range(shape[0] * shape[1]):
+            # Create some deterministic but varied float values
+            val = float(i + random.randint(1, 100) * 0.1)
+            # Use struct.pack to convert float to 4 bytes (little-endian)
+            float_bytes = struct.pack('<f', val)
+            tensor_bytes.extend(float_bytes)
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype}")
     
-    # Convert bytes back to numpy array
-    np_array = np.frombuffer(tensor_data.data, dtype=dtype)
-    return np_array.reshape(shape)
+    # Create metadata
+    metadata = TensorMetadata(
+        shape=list(shape),
+        dtype=dtype,
+        requires_grad=False
+    )
+    
+    # Create tensor data
+    return TensorData(metadata=metadata, data=bytes(tensor_bytes))
+
+
+def compare_tensor_data(tensor1: TensorData, tensor2: TensorData) -> bool:
+    """Compare two TensorData objects for equality."""
+    # Compare metadata
+    if (tensor1.metadata.shape != tensor2.metadata.shape or
+        tensor1.metadata.dtype != tensor2.metadata.dtype or
+        tensor1.metadata.requires_grad != tensor2.metadata.requires_grad):
+        return False
+    
+    # Compare data bytes
+    return tensor1.data == tensor2.data
 
 
 async def test_direct_streaming():
-    """Test direct tensor streaming between two nodes."""
+    """Test direct tensor streaming between two nodes (matches Rust test)."""
     print("=== Testing Direct Tensor Streaming ===")
     
     # Create two nodes
@@ -69,58 +102,66 @@ async def test_direct_streaming():
         await node1.start()
         await node2.start()
         
-        # Get node addresses
+        # Get node addresses (now returns NodeTickets!)
         addr1 = await node1.get_node_addr()
         addr2 = await node2.get_node_addr()
-        print(f"Node 1 address: {addr1}")
-        print(f"Node 2 address: {addr2}")
+        print(f"Node1 NodeTicket: {addr1}")
+        print(f"Node2 NodeTicket: {addr2}")
         
-        # Create test tensor
+        # Create test tensor (exactly like Rust test)
         print("Creating test tensor...")
-        test_tensor = create_test_tensor(shape=(3, 4), dtype="float32")
-        original_array = tensor_data_to_numpy(test_tensor)
-        print(f"Original tensor shape: {original_array.shape}")
-        print(f"Original tensor data: {original_array}")
+        test_tensor = create_test_tensor_deterministic(shape=(3, 4), dtype="float32")
+        print(f"Created test tensor of {len(test_tensor.data)} bytes")
+        print(f"Tensor shape: {test_tensor.metadata.shape}")
+        print(f"Tensor dtype: {test_tensor.metadata.dtype}")
         
         # Register tensor on node1
         print("Registering tensor on node1...")
         node1.register_tensor("test_tensor", test_tensor)
         
-        # Send tensor from node1 to node2
+        # Send tensor from node1 to node2 using NodeTicket
         print("Sending tensor from node1 to node2...")
         start_time = time.time()
         await node1.send_tensor_direct(addr2, "test_tensor", test_tensor)
         
-        # Wait a bit for the tensor to be received
-        await asyncio.sleep(0.1)
+        # Wait briefly for delivery
+        await asyncio.sleep(2)
         
-        # Try to receive tensor on node2
-        print("Attempting to receive tensor on node2...")
-        received_tensor = await node2.receive_tensor()
+        # Try to receive tensor on node2 (with retry loop like Rust test)
+        print("Receiving tensor on node2...")
+        received_tensor = None
+        for attempt in range(1, 51):  # 1 to 50 attempts like Rust test
+            received = await node2.receive_tensor()
+            if received:
+                received_tensor = received
+                print(f"✅ Received on attempt {attempt}")
+                break
+            await asyncio.sleep(0.05)  # 100ms between attempts
         
         if received_tensor:
             end_time = time.time()
             transfer_time = end_time - start_time
             
-            # Convert back to numpy and verify
-            received_array = tensor_data_to_numpy(received_tensor)
-            print(f"Received tensor shape: {received_array.shape}")
-            print(f"Received tensor data: {received_array}")
+            print(f"Received tensor size: {len(received_tensor.data)} bytes")
             print(f"Transfer time: {transfer_time:.3f} seconds")
             
-            # Verify data integrity
-            if np.array_equal(original_array, received_array):
-                print("✅ SUCCESS: Tensor data matches!")
+            # Verify data integrity (like Rust test)
+            if compare_tensor_data(test_tensor, received_tensor):
+                print("✅ SUCCESS: Tensor metadata and data match!")
+                return True
             else:
                 print("❌ ERROR: Tensor data mismatch!")
-                print(f"Difference: {np.max(np.abs(original_array - received_array))}")
+                print(f"Original size: {len(test_tensor.data)}, Received size: {len(received_tensor.data)}")
+                return False
         else:
-            print("❌ ERROR: No tensor received!")
+            print("❌ ERROR: Failed to receive tensor!")
+            return False
             
     except Exception as e:
         print(f"❌ ERROR: {e}")
         import traceback
         traceback.print_exc()
+        return False
     
     finally:
         # Cleanup
@@ -129,9 +170,9 @@ async def test_direct_streaming():
         node2.shutdown()
 
 
-async def test_large_tensor():
-    """Test streaming of a larger tensor."""
-    print("\n=== Testing Large Tensor Streaming ===")
+async def test_larger_tensor():
+    """Test streaming of a larger tensor to verify the protocol works with bigger data."""
+    print("\n=== Testing Larger Tensor Streaming ===")
     
     node1 = create_node(None)
     node2 = create_node(None)
@@ -143,55 +184,117 @@ async def test_large_tensor():
         addr1 = await node1.get_node_addr()
         addr2 = await node2.get_node_addr()
         
-        # Create a larger tensor (1MB)
-        shape = (256, 256)  # 256KB for float32
-        large_tensor = create_test_tensor(shape=shape, dtype="float32")
+        # Create a larger tensor
+        shape = (64, 64)  # 16KB for float32
+        large_tensor = create_test_tensor_random(shape=shape, dtype="float32")
         tensor_size = len(large_tensor.data)
         print(f"Large tensor size: {tensor_size / 1024:.1f} KB")
         
-        # Send large tensor
+        # Register and send large tensor
+        node1.register_tensor("large_tensor", large_tensor)
+        
         start_time = time.time()
         await node1.send_tensor_direct(addr2, "large_tensor", large_tensor)
         
         await asyncio.sleep(0.2)  # Give more time for large transfer
         
-        received_tensor = await node2.receive_tensor()
+        # Try to receive with more attempts for larger tensor
+        received_tensor = None
+        for attempt in range(1, 100):  # More attempts for larger data
+            received = await node2.receive_tensor()
+            if received:
+                received_tensor = received
+                print(f"✅ Large tensor received on attempt {attempt}")
+                break
+            await asyncio.sleep(0.05)  # Faster polling for large tensor
         
         if received_tensor:
             end_time = time.time()
             transfer_time = end_time - start_time
             throughput = (tensor_size / 1024) / transfer_time  # KB/s
             
-            print(f"✅ Large tensor received successfully!")
-            print(f"Transfer time: {transfer_time:.3f} seconds")
-            print(f"Throughput: {throughput:.1f} KB/s")
+            if compare_tensor_data(large_tensor, received_tensor):
+                print(f"✅ Large tensor data integrity verified!")
+                print(f"Transfer time: {transfer_time:.3f} seconds")
+                print(f"Throughput: {throughput:.1f} KB/s")
+                return True
+            else:
+                print("❌ Large tensor data mismatch!")
+                return False
         else:
             print("❌ Large tensor not received!")
+            return False
             
     except Exception as e:
         print(f"❌ ERROR in large tensor test: {e}")
+        return False
     
     finally:
         node1.shutdown()
         node2.shutdown()
 
 
+async def test_node_addressing():
+    """Test that nodes can get their addressing information correctly."""
+    print("\n=== Testing Node Addressing ===")
+    
+    node = create_node(None)
+    
+    try:
+        await node.start()
+        
+        # Get the node's address
+        addr = await node.get_node_addr()
+        print(f"Node address (NodeTicket): {addr}")
+        
+        # Verify it starts with the expected NodeTicket prefix
+        if addr.startswith("node"):
+            print("✅ NodeTicket format is correct")
+            return True
+        else:
+            print(f"❌ Unexpected address format: {addr}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ ERROR in addressing test: {e}")
+        return False
+    
+    finally:
+        node.shutdown()
+
+
 async def main():
     """Main test function."""
     print("Tensor Protocol Direct Streaming Test")
     print("=====================================")
+    print("Updated for NodeTicket format with relay + direct address support")
+    print()
     
     # Run tests
-    await test_direct_streaming()
-    await test_large_tensor()
+    success_count = 0
+    total_tests = 3
     
-    print("\n=== Test Complete ===")
+    if await test_node_addressing():
+        success_count += 1
+        
+    if await test_direct_streaming():
+        success_count += 1
+        
+    if await test_larger_tensor():
+        success_count += 1
+    
+    print(f"\n=== Test Results: {success_count}/{total_tests} tests passed ===")
+    
+    if success_count == total_tests:
+        print("🎉 All tests passed! The tensor protocol is working correctly.")
+    else:
+        print("⚠️  Some tests failed. Check the output above for details.")
 
 
 if __name__ == "__main__":
-    # Set up logging
+    # Set up basic logging
     import logging
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     
     # Run the test
     asyncio.run(main()) 

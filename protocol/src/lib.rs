@@ -41,6 +41,9 @@ uniffi::setup_scaffolding!();
 // This is like a "protocol ID" - it tells other computers what kind of data we're sending
 // Think of it like saying "I speak Tensor Protocol version 0" when connecting
 const TENSOR_ALPN: &[u8] = b"tensor-iroh/direct/0";
+const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
+const MAX_MESSAGE_SIZE: usize = 100 * 1024 * 1024; // 100MB total limit
+
 
 // ============================================================================
 // ERROR TYPES - All the different ways things can go wrong
@@ -226,10 +229,21 @@ impl ProtocolHandler for TensorProtocolHandler {
         let (mut send, mut recv) = connection.accept_bi().await?;
         println!("✅ [ACCEPT] Bidirectional stream established");
 
-        println!("📥 [ACCEPT] Reading incoming message (max 1024 bytes)...");
-        // Read the incoming message (up to 1024 bytes)
-        // this part is GOOD for control plane (not much bytes)
-        let request_bytes = recv.read_to_end(1024).await.map_err(AcceptError::from_err)?;
+        println!("📥 [ACCEPT] Reading incoming message (chunked protocol)...");
+        // Read message type (0 = single, >0 = chunked)
+        let mut type_buf = [0u8; 4];
+        recv.read_exact(&mut type_buf).await.map_err(AcceptError::from_err)?;
+        let message_type = u32::from_le_bytes(type_buf);
+        
+        let request_bytes = if message_type == 0 {
+            // Single message
+            println!("📥 [ACCEPT] Reading single message...");
+            receive_length_prefixed_message(&mut recv).await?
+        } else {
+            // Chunked message
+            println!("📥 [ACCEPT] Reading chunked message ({} chunks)...", message_type);
+            receive_chunked_message(&mut recv, message_type).await?
+        };
         println!("✅ [ACCEPT] Read {} bytes from peer", request_bytes.len());
         
         println!("🗜️ [ACCEPT] Deserializing message with postcard...");
@@ -348,8 +362,6 @@ impl TensorNode {
     #[uniffi::constructor]
     pub fn new(_storage_path: Option<String>) -> Self {
         println!("🏗️ [NEW] Creating new TensorNode...");
-        
-        println!("🏗️ [NEW] Creating protocol handler...");
         // Create the protocol handler
         let handler = Arc::new(TensorProtocolHandler::new());
         
@@ -494,19 +506,22 @@ impl TensorNode {
         
         println!("✅ [SEND] Message serialized successfully (size: {} bytes)", message_bytes.len());
         
-        // println!("📡 [SEND] Writing message bytes to stream...");
-        // Send the bytes over the network
-        send.write_all(&message_bytes).await.map_err(|e| {
-            println!("❌ [SEND] Failed to write message bytes: {:?}", e);
-            e
-        })?;
+        // Check if we need chunking
+        if message_bytes.len() > CHUNK_SIZE {
+            println!("📤 [SEND] Using chunked protocol for {} bytes (threshold: {})", message_bytes.len(), CHUNK_SIZE);
+            send_chunked_message(&mut send, &message_bytes).await?;
+        } else {
+            println!("📤 [SEND] Using length-prefixed protocol for {} bytes", message_bytes.len());
+            send_length_prefixed_message(&mut send, &message_bytes).await?;
+        }
         
         println!("🏁 [SEND] Finishing send stream...");
-        // Signal that we're done sending (like sealing the envelope)
         send.finish().map_err(|e| {
             println!("❌ [SEND] Failed to finish send stream: {}", e);
             TensorError::Connection { message: e.to_string() }
         })?;
+        
+        drop(connection); // Close the entire connection
 
         println!("🎉 [SEND] Tensor '{}' sent successfully", tensor_name);
         debug!("Tensor '{}' sent successfully", tensor_name);
@@ -624,8 +639,27 @@ impl TensorNode {
     // Shuts down the node (like closing the office)
     #[uniffi::method]
     pub fn shutdown(&self) -> Result<(), TensorError> {
-        info!("Shutting down tensor node...");
-        // When the router is dropped, it automatically shuts down
+        println!("🔒 [SHUTDOWN] Shutting down tensor node...");
+        
+        // Take and drop the router (stops accepting new connections)
+        if let Some(router) = self.router.lock().unwrap().take() {
+            println!("✅ [SHUTDOWN] Router stopped");
+            drop(router);
+        }
+        
+        // Take and drop the endpoint (closes all connections)
+        if let Some(endpoint) = self.endpoint.lock().unwrap().take() {
+            println!("✅ [SHUTDOWN] Endpoint closed");
+            drop(endpoint);
+        }
+        
+        // Take and drop the receiver channel (closes the channel)
+        if let Some(receiver) = self.receiver_rx.lock().unwrap().take() {
+            println!("✅ [SHUTDOWN] Receiver channel closed");
+            drop(receiver);
+        }
+        
+        println!("🎉 [SHUTDOWN] Tensor node shutdown complete");
         Ok(())
     }
 }
@@ -645,4 +679,136 @@ pub fn create_node(_storage_path: Option<String>) -> TensorNode {
 #[uniffi::export(with_foreign)]
 pub trait TensorReceiveCallback: Send + Sync + 'static {
     fn on_tensor_received(&self, peer_id: String, tensor_name: String, tensor: TensorData);
+} 
+
+// Compression helpers
+fn compress_data(data: &[u8]) -> Result<Vec<u8>, TensorError> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+    
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data)?;
+    Ok(encoder.finish()?)
+}
+
+fn decompress_data(data: &[u8]) -> Result<Vec<u8>, TensorError> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+    
+    let mut decoder = GzDecoder::new(data);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed)?;
+    Ok(decompressed)
+}
+
+// New helper functions
+async fn send_chunked_message(
+    send: &mut iroh::endpoint::SendStream,
+    data: &[u8],
+) -> Result<(), TensorError> {
+    println!("📤 [CHUNKED] Starting chunked send of {} bytes", data.len());
+    
+    // Send number of chunks first (this becomes the message_type)
+    let num_chunks = (data.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    send.write_all(&(num_chunks as u32).to_le_bytes()).await?;
+    
+    // Send total length
+    let total_len = data.len() as u32;
+    send.write_all(&total_len.to_le_bytes()).await?;
+    
+    println!("📤 [CHUNKED] Sent headers: {} chunks, {} total bytes", num_chunks, total_len);
+    
+    // Send each chunk with its size
+    for (chunk_idx, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
+        let chunk_size = chunk.len() as u32;
+        send.write_all(&chunk_size.to_le_bytes()).await?;
+        send.write_all(chunk).await?;
+        println!("📤 [CHUNKED] Sent chunk {}/{}: {} bytes", chunk_idx + 1, num_chunks, chunk_size);
+    }
+    
+    // Note: Stream will be finished by the caller
+    println!("📤 [CHUNKED] All chunks sent successfully");
+    
+    Ok(())
+}
+
+async fn send_length_prefixed_message(
+    send: &mut iroh::endpoint::SendStream,
+    data: &[u8],
+) -> Result<(), TensorError> {
+    println!("📤 [LENGTH_PREFIXED] Sending {} bytes", data.len());
+    // Send 0 to indicate non-chunked
+    send.write_all(&0u32.to_le_bytes()).await?;
+    // Send length
+    send.write_all(&(data.len() as u32).to_le_bytes()).await?;
+    // Send data
+    send.write_all(data).await?;
+    println!("📤 [LENGTH_PREFIXED] Data sent successfully");
+    Ok(())
+}
+
+async fn receive_length_prefixed_message(
+    recv: &mut iroh::endpoint::RecvStream,
+) -> Result<Vec<u8>, AcceptError> {
+    // Read length
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf).await.map_err(AcceptError::from_err)?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    
+    if len > MAX_MESSAGE_SIZE {
+        return Err(AcceptError::from_err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Message too large"
+        )));
+    }
+    
+    // Read data
+    let mut data = vec![0u8; len];
+    recv.read_exact(&mut data).await.map_err(AcceptError::from_err)?;
+    Ok(data)
+}
+
+async fn receive_chunked_message(
+    recv: &mut iroh::endpoint::RecvStream,
+    num_chunks: u32,
+) -> Result<Vec<u8>, AcceptError> {
+    println!("📦 [CHUNKED] Reading total length...");
+    // Read total length
+    let mut total_len_buf = [0u8; 4];
+    recv.read_exact(&mut total_len_buf).await.map_err(AcceptError::from_err)?;
+    let total_len = u32::from_le_bytes(total_len_buf) as usize;
+    
+    println!("📦 [CHUNKED] Total length: {} bytes, {} chunks", total_len, num_chunks);
+    
+    if total_len > MAX_MESSAGE_SIZE {
+        return Err(AcceptError::from_err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Message too large"
+        )));
+    }
+    
+    let mut data = Vec::with_capacity(total_len);
+    
+    // Read each chunk
+    for chunk_idx in 0..num_chunks {
+        println!("📦 [CHUNKED] Reading chunk {}/{}", chunk_idx + 1, num_chunks);
+        
+        // Read chunk size
+        let mut chunk_size_buf = [0u8; 4];
+        recv.read_exact(&mut chunk_size_buf).await.map_err(AcceptError::from_err)?;
+        let chunk_size = u32::from_le_bytes(chunk_size_buf) as usize;
+        
+        println!("📦 [CHUNKED] Chunk {} size: {} bytes", chunk_idx + 1, chunk_size);
+        
+        // Read chunk data
+        let mut chunk_data = vec![0u8; chunk_size];
+        recv.read_exact(&mut chunk_data).await.map_err(AcceptError::from_err)?;
+        data.extend_from_slice(&chunk_data);
+        
+        println!("📦 [CHUNKED] Chunk {} read successfully, total so far: {} bytes", chunk_idx + 1, data.len());
+    }
+    
+    println!("📦 [CHUNKED] All chunks read successfully! Total: {} bytes", data.len());
+    Ok(data)
 } 
