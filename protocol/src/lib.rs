@@ -350,8 +350,6 @@ impl TensorNode {
     #[uniffi::constructor]
     pub fn new(_storage_path: Option<String>) -> Self {
         println!("🏗️ [NEW] Creating new TensorNode...");
-        
-        println!("🏗️ [NEW] Creating protocol handler...");
         // Create the protocol handler
         let handler = Arc::new(TensorProtocolHandler::new());
         
@@ -626,8 +624,27 @@ impl TensorNode {
     // Shuts down the node (like closing the office)
     #[uniffi::method]
     pub fn shutdown(&self) -> Result<(), TensorError> {
-        info!("Shutting down tensor node...");
-        // When the router is dropped, it automatically shuts down
+        println!("🔒 [SHUTDOWN] Shutting down tensor node...");
+        
+        // Take and drop the router (stops accepting new connections)
+        if let Some(router) = self.router.lock().unwrap().take() {
+            println!("✅ [SHUTDOWN] Router stopped");
+            drop(router);
+        }
+        
+        // Take and drop the endpoint (closes all connections)
+        if let Some(endpoint) = self.endpoint.lock().unwrap().take() {
+            println!("✅ [SHUTDOWN] Endpoint closed");
+            drop(endpoint);
+        }
+        
+        // Take and drop the receiver channel (closes the channel)
+        if let Some(receiver) = self.receiver_rx.lock().unwrap().take() {
+            println!("✅ [SHUTDOWN] Receiver channel closed");
+            drop(receiver);
+        }
+        
+        println!("🎉 [SHUTDOWN] Tensor node shutdown complete");
         Ok(())
     }
 }
