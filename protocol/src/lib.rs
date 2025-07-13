@@ -826,6 +826,14 @@ impl TensorNode {
         println!("🎉 [SHUTDOWN] Tensor node shutdown complete");
         Ok(())
     }
+
+    /// Number of currently-pooled connections
+    #[uniffi::method(async_runtime = "tokio")]
+    pub async fn get_pool_size(&self) -> Result<u32, TensorError> {
+        // grab the map inside the pool and return its len()
+        let conns = self.connection_pool.connections.lock().await;
+        Ok(conns.len() as u32)
+    }
 }
 
 // ============================================================================
