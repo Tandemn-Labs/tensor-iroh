@@ -296,17 +296,15 @@ async fn test_rapid_fire_sends() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+
 async fn test_large_tensor() -> Result<(), Box<dyn Error>> {
     println!("\n--- Test 5: Large Tensor Transfer ---");
     
     let node1 = create_node(None);
     let node2 = create_node(None);
-
     node1.start().await?;
     node2.start().await?;
-
     let addr2 = node2.get_node_addr().await?;
-
     // Create a large tensor (1MB)
     let large_tensor = create_test_tensor(vec![512, 512], "float32".to_string()); // 1MB tensor
     println!("Created large tensor: {} bytes", large_tensor.data.len());
@@ -323,13 +321,11 @@ async fn test_large_tensor() -> Result<(), Box<dyn Error>> {
         return Err("Large tensor send timed out".into());
     }
     send_result??;
-
     // Wait longer for large tensor
     sleep(Duration::from_millis(500)).await;
     
     let received = wait_for_tensor(&node2, 100).await?;
     validate_tensor(&large_tensor, &received)?;
-
     cleanup_nodes(&[node1, node2]).await;
     
     Ok(())
