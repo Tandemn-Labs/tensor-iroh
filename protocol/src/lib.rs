@@ -44,7 +44,7 @@ uniffi::setup_scaffolding!();
 // This is like a "protocol ID" - it tells other computers what kind of data we're sending
 // Think of it like saying "I speak Tensor Protocol version 0" when connecting
 const TENSOR_ALPN: &[u8] = b"tensor-iroh/direct/0";
-const CHUNK_SIZE: usize = 2 * 1024; // 16KB chunks (this is for the larger tensors)
+const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks (this is for the larger tensors)
 const MAX_MESSAGE_SIZE: usize = 100 * 1024 * 1024; // 100MB total limit
 
 
