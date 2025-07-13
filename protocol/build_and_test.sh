@@ -25,15 +25,32 @@ fi
 # Generate Python bindings
 echo "Generating Python bindings..."
 uniffi-bindgen generate src/tensor_protocol.udl --language python --out-dir .
-
 # Create Python package structure
 echo "Setting up Python package..."
 mkdir -p tensor_protocol_py
 cp tensor_protocol.py tensor_protocol_py/
-cp target/release/libtensor_protocol.so tensor_protocol_py/ 2>/dev/null || \
-cp target/release/libtensor_protocol.dylib tensor_protocol_py/ 2>/dev/null || \
-cp target/release/tensor_protocol.dll tensor_protocol_py/ 2>/dev/null || \
-echo "Warning: Could not find compiled library"
+
+# ------------------------------------------------------------------
+# Copy + rename the compiled dynamic library so that UniFFI-Python
+# can find it under the name it expects:  libuniffi_tensor_protocol.*
+# ------------------------------------------------------------------
+echo "Copying dynamic library for Python…"
+case "$(uname -s)" in
+    Linux*)
+        cp target/release/libtensor_protocol.so \
+           tensor_protocol_py/libuniffi_tensor_protocol.so
+        ;;
+    Darwin*)
+        cp target/release/libtensor_protocol.dylib \
+           tensor_protocol_py/libuniffi_tensor_protocol.dylib
+        ;;
+    MINGW*|MSYS*|CYGWIN*)
+        cp target/release/tensor_protocol.dll \
+           tensor_protocol_py/uniffi_tensor_protocol.dll
+        ;;
+    *)
+        echo "Unsupported platform"; exit 1;;
+esac
 
 # Create __init__.py
 cat > tensor_protocol_py/__init__.py << 'EOF'
@@ -53,5 +70,8 @@ pip install numpy
 export PYTHONPATH="$PWD/tensor_protocol_py:$PYTHONPATH"
 
 echo "=== Build Complete ==="
+echo "Files in tensor_protocol_py:"
+ls -la tensor_protocol_py/
+echo ""
 echo "To test, run: python test_tensor_protocol.py"
 echo "Or run: PYTHONPATH=./tensor_protocol_py python test_tensor_protocol.py" 
