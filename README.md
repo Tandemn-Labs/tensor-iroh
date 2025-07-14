@@ -238,25 +238,6 @@ The protocol includes comprehensive error handling:
 6. **Pool Metrics**: Connection pool performance monitoring
 7. **Adaptive Pooling**: Dynamic pool size based on usage patterns
 
-## Comparison with Existing Solutions
-
-### vs. Psyche's Blob Approach
-- **Faster**: Direct streaming eliminates blob storage overhead
-- **Simpler**: Single-step transfer vs. 3-step blob process
-- **Real-time**: Better suited for inference workloads
-- **Connection reuse**: Optimized for repeated sends to same peers
-
-### vs. Traditional RPC
-- **Efficient**: QUIC's multiplexing and flow control
-- **Reliable**: Built-in error recovery and congestion control
-- **Scalable**: P2P architecture without central bottlenecks
-- **Pooled**: Intelligent connection reuse for performance
-
-### vs. Other Tensor Protocols
-- **Production-ready**: Comprehensive testing and error handling
-- **Async-first**: Built for modern async/await patterns
-- **Cross-language**: Python bindings via UniFFI
-- **Optimized**: Connection pooling for high-frequency usage
 
 ## License
 
