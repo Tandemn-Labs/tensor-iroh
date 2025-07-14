@@ -117,6 +117,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         println!("❌ Test 12/12: Post-shutdown behavior - FAILED");
     }
+
+    // Test 13: Connection pool reuse
+    total += 1;
+    if test_pool_reuse().await.is_ok() {
+        passed += 1;
+        println!("✅ Test 13/13: Connection pool reuse - PASSED");
+    } else {
+        println!("❌ Test 13/13: Connection pool reuse - FAILED");
+    }
     
     println!("\n=== COMPREHENSIVE STRESS TEST RESULTS ===");
     println!("Passed: {}/{} tests", passed, total);
@@ -646,6 +655,38 @@ async fn test_post_shutdown_behavior() -> Result<(), Box<dyn Error>> {
     sleep(Duration::from_millis(50)).await;
     
     Ok(())
+}
+
+/// Test that repeated sends to the same peer only ever create one pooled connection.
+async fn test_pool_reuse() -> Result<(), Box<dyn Error>> {
+    let node1 = create_node(None);
+    let node2 = create_node(None);
+    node1.start().await?;
+    node2.start().await?;
+
+    let addr2 = node2.get_node_addr().await?;
+    let tensor = create_test_tensor(vec![2, 2], "float32".to_string());
+    node1.register_tensor("pool_test".to_string(), tensor.clone())?;
+
+    // First send → should open exactly one connection
+    node1.send_tensor_direct(addr2.clone(), "pool_test".to_string(), tensor.clone()).await?;
+    sleep(Duration::from_millis(100)).await;
+    let size1 = node1.get_pool_size().await?;
+
+    // Second send → should re-use, not grow
+    node1.send_tensor_direct(addr2.clone(), "pool_test".to_string(), tensor).await?;
+    sleep(Duration::from_millis(100)).await;
+    let size2 = node1.get_pool_size().await?;
+
+    if size1 == 1 && size2 == 1 {
+        Ok(())
+    } else {
+        Err(format!(
+            "Pool size after first send = {}, after second send = {} (expected both == 1)",
+            size1, size2
+        )
+        .into())
+    }
 }
 
 // Helper functions

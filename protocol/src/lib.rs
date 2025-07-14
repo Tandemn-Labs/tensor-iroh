@@ -16,6 +16,7 @@
 use std::{
     collections::HashMap,           // For storing tensors by name (like a dictionary)
     sync::{Arc, Mutex},            // For thread-safe sharing of data
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;                // A flexible error handling type
@@ -30,6 +31,8 @@ use tokio::sync::{mpsc};          // For async message passing between parts of 
 use tracing::{debug, error, info, warn}; // For logging what's happening (like print statements but better)
 use iroh::Watcher;                // For watching network changes
 
+use tokio::sync::{Mutex as AsyncMutex, RwLock};    //
+
 // This tells UniFFI (the cross-language binding generator) to set up the scaffolding
 // It's like telling the "translator" to get ready to translate our Rust code
 uniffi::setup_scaffolding!();
@@ -41,7 +44,7 @@ uniffi::setup_scaffolding!();
 // This is like a "protocol ID" - it tells other computers what kind of data we're sending
 // Think of it like saying "I speak Tensor Protocol version 0" when connecting
 const TENSOR_ALPN: &[u8] = b"tensor-iroh/direct/0";
-const CHUNK_SIZE: usize = 2 * 1024; // 16KB chunks (this is for the larger tensors)
+const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks (this is for the larger tensors)
 const MAX_MESSAGE_SIZE: usize = 100 * 1024 * 1024; // 100MB total limit
 
 
@@ -128,6 +131,13 @@ impl From<ParseError> for TensorError {
     }
 }
 
+
+impl From<ConnectError> for TensorError {
+    fn from(err: ConnectError) -> Self {
+        TensorError::Connection { message: err.to_string() }
+    }
+}
+
 // ============================================================================
 // DATA STRUCTURES - The custom data types we use
 // ============================================================================
@@ -152,6 +162,124 @@ pub struct TensorData {
     pub metadata: TensorMetadata,  // Information about the tensor
     pub data: Vec<u8>,            // The actual tensor data as raw bytes
 }
+
+// ============================================================================
+// CONNECTION POOL - A simple implementation of a connection pool
+// ============================================================================
+// this is a struct for the TensorNode's PooledConnection
+// The idea of the PooledConnection is to keep a list of connections to other peers
+// and to be able to reuse them.
+// It is a simple implementation of a connection pool. Look into it more
+#[derive(Debug)] // no need to provide Clone access to it
+pub struct PooledConnection {
+    connections: Connection, // this stores the actual object of Iroh Connection
+    last_used: Arc<Mutex<Instant>>, // this stores the last time the connection was used
+    is_idle: Arc<Mutex<bool>>, // this stores whether the connection is idle
+}
+
+#[derive(Debug)] // no need to provide Clone access to it
+pub struct ConnectionPool{
+    connections: Arc<AsyncMutex<HashMap<String, PooledConnection>>>, // this stores the connections to other peers 
+    max_idle_time: Duration, // this stores the maximum idle time of the connection
+    max_connections: usize, // this stores the maximum number of connections to other peers
+}
+
+impl ConnectionPool {
+    // Creates a new connection pool with specified limits
+    // max_connections: Maximum number of concurrent connections to maintain
+    // max_idle_time: How long a connection can sit unused before being closed
+    fn new(max_connections: usize, max_idle_time: Duration) -> Self {
+        Self {
+            // Initialize with an empty HashMap wrapped in Arc<Mutex<>> for thread-safe access
+            // Arc allows multiple threads to share ownership of the HashMap
+            // Mutex ensures only one thread can modify the HashMap at a time
+            connections: Arc::new(AsyncMutex::new(HashMap::new())),
+            max_idle_time,
+            max_connections,
+        }
+    }
+
+    async fn get_connection(&self, peer_id: &str, endpoint: &Endpoint,node_addr: &NodeAddr)-> Result<Connection, TensorError>{
+        // check if we ALREADY have a connection to this peer or not
+        // async-aware lock
+        let mut conns = self.connections.lock().await;
+         // fast-path: reuse if still warm
+        if let Some(pc) = conns.get_mut(peer_id) {
+            let is_idle     = *pc.is_idle.lock().unwrap(); // use unwrap here, becuase we are not using tokio mutex 
+            let last_used = *pc.last_used.lock().unwrap(); // use unwrap here, becuase we are not using tokio mutex 
+            if !is_idle && last_used.elapsed() < self.max_idle_time {
+                *pc.last_used.lock().unwrap() = Instant::now();
+                return Ok(pc.connections.clone());
+            }
+        }
+
+        // slow-path: create new, store, and return
+        // let connection = endpoint.connect(node_addr, TENSOR_ALPN).await?;
+        let connection = endpoint.connect(node_addr.clone(), TENSOR_ALPN).await.map_err(|e| TensorError::Connection { message: e.to_string() })?;
+        conns.insert(
+            peer_id.to_string(),
+            PooledConnection {
+                connections: connection.clone(),
+                last_used: Arc::new(Mutex::new(Instant::now())),
+                is_idle:   Arc::new(Mutex::new(false)),
+            },
+        );
+        // if let Some(connection) = self.connection.get_mul(peer_id){
+        //     if !pooled_conn.is_idle && pooled_conn.last_used.elapsed() < self.max_idle_time{
+        //         // that means that the connection is still valid and you should use it
+        //         *pooled_conn.last_used.lock().unwrap() = Instant::now(); // doubt here - why is the *needed? is it same as C++ *? 
+        //         return Ok(pooled_conn.connections); // check if clone is needed or not
+        //     }
+        // }
+
+        // // if we don't have a connection to this peer, we need to create a new one
+        // let connection = endpoint.connect(node_addr, TENSOR_ALPN).await?;
+        // // and then put it in the (existing) Pool of all the connections
+        // self.connections.lock().unwrap().insert(peer_id.to_string(), PooledConnection {
+        //     connections: connection,
+        //     last_used: Arc::new(Mutex::new(Instant::now())),
+        //     is_idle: Arc::new(Mutex::new(false)),
+        // });
+        Ok(connection)
+    }
+
+    // Returns a connection to the pool when it's no longer needed
+    // This allows the connection to be reused by other operations
+    // async fn return_connection(&self, peer_id: &str) {
+    //     if let Some(pooled_conn) = self.connections.lock().unwrap().get(peer_id) {
+    //         // Mark the connection as idle so it can be reused
+    //         *pooled_conn.is_idle.lock().unwrap() = true;
+    //         // Update the last used time
+    //         *pooled_conn.last_used.lock().unwrap() = Instant::now();
+    //     }
+    // }
+
+    async fn return_connection(&self, peer_id: &str) {
+        let conns = self.connections.lock().await;
+        if let Some(pc) = conns.get(peer_id) {
+            *pc.is_idle.lock().unwrap() = true;
+            *pc.last_used.lock().unwrap() = Instant::now();
+        }
+    }
+
+    // Cleans up expired connections from the pool
+    // This should be called periodically to prevent memory leaks
+    async fn cleanup_expired_connections(&self) {
+        // let mut connections = self.connections.lock().unwrap();
+        let mut connections = self.connections.lock().await;
+        let now = Instant::now();
+        
+        // Remove connections that have been idle for too long
+        connections.retain(|_, pooled_conn| {
+            let last_used = *pooled_conn.last_used.lock().unwrap();
+            let is_idle = *pooled_conn.is_idle.lock().unwrap();
+            
+            // Keep the connection if it's not idle or hasn't exceeded max idle time
+            !is_idle || (now.duration_since(last_used) < self.max_idle_time)
+        });
+    }   
+}
+
 
 // ============================================================================
 // PROTOCOL MESSAGE TYPES - The different types of messages peers can send
@@ -354,6 +482,11 @@ pub struct TensorNode {
     
     // Channel for receiving tensors from other peers
     receiver_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<(String, String, TensorData)>>>>,
+
+    // Adding the connection Pool here so that the TensorNode can use it
+    // connection_pool: Arc<RwLock<ConnectionPool>>, // making sure the entire ConnectionPool
+    connection_pool: Arc<ConnectionPool>, // making sure the entire ConnectionPool is thread safe
+    // struct is thread safe, and hence we have to add RwLock and Arc to it. 
 }
 
 #[uniffi::export]  // Makes these methods available to other programming languages
@@ -370,6 +503,13 @@ impl TensorNode {
         // tx = transmitter (sender), rx = receiver
         let (tx, rx) = mpsc::unbounded_channel();
         handler.set_receiver(tx);
+
+        // Create the connection pool
+        println!("🏗️ [NEW] Creating connection pool...");
+        let connection_pool = Arc::new(ConnectionPool::new(
+            10, // max number of connections to maintain
+            Duration::from_secs(300)));  //make sure the nodes stay on atleast for 5 minutes
+
         
         println!("✅ [NEW] TensorNode created successfully");
 
@@ -380,6 +520,7 @@ impl TensorNode {
             router: Arc::new(Mutex::new(None)),
             handler,
             receiver_rx: Arc::new(Mutex::new(Some(rx))),
+            connection_pool, // send the connection pool to the TensorNode 
         }
     }
 
@@ -470,14 +611,23 @@ impl TensorNode {
         // println!("🔍 [SEND] Peer relay_url: {:?}", node_addr.relay_url);
         // println!("🔍 [SEND] Peer direct_addresses: {} found", node_addr.direct_addresses.len());
 
-        // println!("🔗 [SEND] Connecting to peer...");
         // Connect to the peer
         // Iroh will automatically try both relay and direct addresses
-        let connection = endpoint.connect(node_addr, TENSOR_ALPN).await
-            .map_err(|e: ConnectError| {
-                println!("❌ [SEND] Connection failed: {}", e);
-                TensorError::Connection { message: e.to_string() }
-            })?;
+        // Get connection from pool
+        println!("🔗 [SEND] Getting Peer From the existing pool (if it exists)... ");
+        let peer_id = node_addr.node_id.to_string();
+        // let connection = {
+        //     let mut pool = self.connection_pool.read().await; // get the connection pool in an async way
+        //     pool.get_connection(&peer_id, &endpoint, &node_addr).await?
+        // };
+
+        let connection = self.connection_pool.get_connection(&peer_id, &endpoint, &node_addr).await?;
+
+        // let connection = endpoint.connect(node_addr, TENSOR_ALPN).await
+        //     .map_err(|e: ConnectError| {
+        //         println!("❌ [SEND] Connection failed: {}", e);
+        //         TensorError::Connection { message: e.to_string() }
+        //     })?;
         
         println!("✅ [SEND] Connected to peer successfully");
 
@@ -526,8 +676,16 @@ impl TensorNode {
         // println!("⏳ [SEND] Waiting for connection to close gracefully...");
         // connection.closed().await;
         // println!("🔒 [SEND] Connection closed gracefully");
+        
+        // Return connection to pool instead of dropping it
+        // {
+        //     let mut pool = self.connection_pool.write().await;
+        //     pool.return_connection(&peer_id, connection).await;
+        // }  
+        // drop(connection);
 
-        drop(connection); // Close the entire connection
+        self.connection_pool.return_connection(&peer_id).await;
+
 
         println!("🎉 [SEND] Tensor '{}' sent successfully", tensor_name);
         debug!("Tensor '{}' sent successfully", tensor_name);
@@ -667,6 +825,14 @@ impl TensorNode {
         
         println!("🎉 [SHUTDOWN] Tensor node shutdown complete");
         Ok(())
+    }
+
+    /// Number of currently-pooled connections
+    #[uniffi::method(async_runtime = "tokio")]
+    pub async fn get_pool_size(&self) -> Result<u32, TensorError> {
+        // grab the map inside the pool and return its len()
+        let conns = self.connection_pool.connections.lock().await;
+        Ok(conns.len() as u32)
     }
 }
 
