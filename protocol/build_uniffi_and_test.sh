@@ -73,5 +73,5 @@ echo "=== Build Complete ==="
 echo "Files in tensor_protocol_py:"
 ls -la tensor_protocol_py/
 echo ""
-echo "To test, run: python test_tensor_protocol.py"
-echo "Or run: PYTHONPATH=./tensor_protocol_py python test_tensor_protocol.py" 
+echo "To test, run: python test_tensor_protocol_uniffi.py"
+echo "Or run: PYTHONPATH=./tensor_protocol_py python test_tensor_protocol_uniffi.py" 
