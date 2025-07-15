@@ -469,7 +469,7 @@ impl ProtocolHandler for TensorProtocolHandler {
 
 // This is the main class that users will interact with
 // Think of it as the "control panel" for our tensor networking system
-#[derive(uniffi::Object)]
+#[derive(uniffi::Object, Clone)]
 pub struct TensorNode {
     // The network endpoint (like our "network interface card")
     endpoint: Arc<Mutex<Option<Endpoint>>>,
@@ -984,3 +984,6 @@ async fn receive_chunked_message(
     println!("📦 [CHUNKED] All chunks read successfully! Total: {} bytes", data.len());
     Ok(data)
 } 
+
+#[cfg(feature = "python")]
+pub mod pyo3_mod;

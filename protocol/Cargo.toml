@@ -33,11 +33,19 @@ tracing = "0.1"
 quinn = "0.11.8"
 uniffi_bindgen = "0.29.3"
 
+# pyo3 stuff
+pyo3 = { version = "0.20", features = ["extension-module", "abi3-py38"], optional = true }
+pyo3-asyncio = { version = "0.20", features = ["tokio-runtime"], optional = true }
+numpy = { version = "0.20", optional = true }
+tch   = { version = "0.20", optional = true }
+
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build", "tokio"] }
 
 [features]
 default = [] 
+python  = ["pyo3", "numpy", "pyo3-asyncio"]   # activate for PyO3 bindings
+torch   = ["python", "tch"]   # opt-in Torch support (large compile, so not in default "python")
 
 # Development profile optimizations for faster compilation
 [profile.dev]
