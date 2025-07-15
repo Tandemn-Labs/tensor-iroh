@@ -1,0 +1,20 @@
+# Tensor Protocol Python Dependencies
+# Core dependencies for tensor operations and protocol functionality
+
+# Numerical computing - required for tensor operations
+numpy>=1.21.0
+
+# Optional: For development and testing
+# pytest>=7.0.0
+# pytest-asyncio>=0.21.0
+# black>=22.0.0
+# flake8>=5.0.0
+# mypy>=1.0.0
+
+# Optional: For additional tensor operations (if needed)
+torch>=1.12.0
+# tensorflow>=2.10.0
+
+# Optional: For network testing and utilities
+# requests>=2.28.0
+# aiohttp>=3.8.0
