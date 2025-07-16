@@ -16,7 +16,7 @@ if ! command -v maturin &> /dev/null; then
   pip install maturin
 fi
 # Build *in place* (editable-like): puts .so into ./target/wheels/ and installs it.
-maturin develop --release -F "python,torch"
+maturin build --release -F "python,torch" --out ./target/wheels
 
 echo "✅ PyO3 wheel (with torch support) built & installed in your active venv."
 echo " Try in Python:"
