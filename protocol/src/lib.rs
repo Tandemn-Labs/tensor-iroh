@@ -33,6 +33,18 @@ use iroh::Watcher;                // For watching network changes
 
 use tokio::sync::{Mutex as AsyncMutex, RwLock};    //
 
+// log only errors
+use std::sync::Once;
+static INIT_TRACING: Once = Once::new();
+
+fn init_tracing() {
+    INIT_TRACING.call_once(|| {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .init();
+    });
+}
+
 // This tells UniFFI (the cross-language binding generator) to set up the scaffolding
 // It's like telling the "translator" to get ready to translate our Rust code
 uniffi::setup_scaffolding!();
@@ -345,19 +357,19 @@ impl ProtocolHandler for TensorProtocolHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         // Get the ID of who's connecting to us
         let peer_id_result = connection.remote_node_id();
-        println!("🚪 [ACCEPT] Incoming connection...");
+        info!("🚪 [ACCEPT] Incoming connection...");
         
         let peer_id = peer_id_result?.to_string();
-        println!("🚪 [ACCEPT] Connection from peer: {}", peer_id);
+        info!("🚪 [ACCEPT] Connection from peer: {}", peer_id);
         debug!("Accepted tensor connection from {}", peer_id);
 
-        println!("📡 [ACCEPT] Setting up bidirectional stream...");
+        debug!("📡 [ACCEPT] Setting up bidirectional stream...");
         // Set up a two-way communication channel
         // send = for sending data to the peer, recv = for receiving data from the peer
         let (mut send, mut recv) = connection.accept_bi().await?;
-        println!("✅ [ACCEPT] Bidirectional stream established");
+        info!("✅ [ACCEPT] Bidirectional stream established");
 
-        println!("📥 [ACCEPT] Reading incoming message (chunked protocol)...");
+        debug!("📥 [ACCEPT] Reading incoming message (chunked protocol)...");
         // Read message type (0 = single, >0 = chunked)
         let mut type_buf = [0u8; 4];
         recv.read_exact(&mut type_buf).await.map_err(AcceptError::from_err)?;
@@ -365,41 +377,41 @@ impl ProtocolHandler for TensorProtocolHandler {
         
         let request_bytes = if message_type == 0 {
             // Single message
-            println!("📥 [ACCEPT] Reading single message...");
+            debug!("📥 [ACCEPT] Reading single message...");
             receive_length_prefixed_message(&mut recv).await?
         } else {
             // Chunked message
-            println!("📥 [ACCEPT] Reading chunked message ({} chunks)...", message_type);
+            debug!("📥 [ACCEPT] Reading chunked message ({} chunks)...", message_type);
             receive_chunked_message(&mut recv, message_type).await?
         };
-        println!("✅ [ACCEPT] Read {} bytes from peer", request_bytes.len());
+        debug!("✅ [ACCEPT] Read {} bytes from peer", request_bytes.len());
         
-        println!("🗜️ [ACCEPT] Deserializing message with postcard...");
+        debug!("🗜️ [ACCEPT] Deserializing message with postcard...");
         // Convert the raw bytes back into a TensorMessage using postcard
         // This is like opening an envelope and reading the letter inside
         // this part is GOOD for control plane (not much bytes)
         let message: TensorMessage = postcard::from_bytes(&request_bytes)
             .map_err(|e| {
-                println!("❌ [ACCEPT] Deserialization failed: {:?}", e);
+                error!("❌ [ACCEPT] Deserialization failed: {:?}", e);
                 AcceptError::from_err(e)
             })?;
-        println!("✅ [ACCEPT] Message deserialized successfully");
+        debug!("✅ [ACCEPT] Message deserialized successfully");
 
         // Handle different types of messages
         match message {
             // Someone is asking us for a tensor
             TensorMessage::Request { tensor_name } => {
-                println!("📥 [ACCEPT] Received REQUEST for tensor: {}", tensor_name);
+                info!("📥 [ACCEPT] Received REQUEST for tensor: {}", tensor_name);
                 debug!("Received request for tensor: {}", tensor_name);
 
-                println!("🔍 [ACCEPT] Looking up tensor in storage...");
+                debug!("🔍 [ACCEPT] Looking up tensor in storage...");
                 // Look up the tensor in our storage
                 let response = {
                     let store = self.tensor_store.lock().unwrap();
                     match store.get(&tensor_name) {
                         // We have the tensor - send it back
                         Some(tensor_data) => {
-                            println!("✅ [ACCEPT] Found tensor '{}' (size: {} bytes)", tensor_name, tensor_data.data.len());
+                            info!("✅ [ACCEPT] Found tensor '{}' (size: {} bytes)", tensor_name, tensor_data.data.len());
                             TensorMessage::Response {
                                 tensor_name: tensor_name.clone(),
                                 data: tensor_data.clone(),
@@ -407,7 +419,7 @@ impl ProtocolHandler for TensorProtocolHandler {
                         }
                         // We don't have the tensor - send an error
                         None => {
-                            println!("❌ [ACCEPT] Tensor '{}' not found", tensor_name);
+                            warn!("❌ [ACCEPT] Tensor '{}' not found", tensor_name);
                             TensorMessage::Error {
                                 message: format!("Tensor '{}' not found", tensor_name),
                             }
@@ -415,50 +427,50 @@ impl ProtocolHandler for TensorProtocolHandler {
                     }
                 };
 
-                println!("🗜️ [ACCEPT] Serializing response...");
+                debug!("🗜️ [ACCEPT] Serializing response...");
                 // Convert our response back to bytes using postcard
                 let response_bytes = postcard::to_allocvec(&response)
                     .map_err(|e| {
-                        println!("❌ [ACCEPT] Response serialization failed: {:?}", e);
+                        error!("❌ [ACCEPT] Response serialization failed: {:?}", e);
                         AcceptError::from_err(e)
                     })?;
                 
-                println!("📤 [ACCEPT] Sending response ({} bytes)...", response_bytes.len());
+                debug!("📤 [ACCEPT] Sending response ({} bytes)...", response_bytes.len());
                 // Send the response back to the peer
                 send.write_all(&response_bytes).await.map_err(AcceptError::from_err)?;
                 send.finish().map_err(AcceptError::from_err)?;
-                println!("✅ [ACCEPT] Response sent successfully");
+                info!("✅ [ACCEPT] Response sent successfully");
             }
             
             // Someone is sending us a tensor (unsolicited)
             TensorMessage::Response { tensor_name, data } => {
-                println!("📥 [ACCEPT] Received RESPONSE with tensor: {} (size: {} bytes)", tensor_name, data.data.len());
+                info!("📥 [ACCEPT] Received RESPONSE with tensor: {} (size: {} bytes)", tensor_name, data.data.len());
                 debug!("Received tensor data: {}", tensor_name);
                 
-                println!("📨 [ACCEPT] Forwarding tensor to receiver channel...");
+                debug!("📨 [ACCEPT] Forwarding tensor to receiver channel...");
                 // If we have a receiver channel set up, forward the tensor to the main application
                 if let Some(tx) = self.receiver_tx.lock().unwrap().as_ref() {
                     let send_result = tx.send((peer_id.clone(), tensor_name.clone(), data));
                     match send_result {
-                        Ok(_) => println!("✅ [ACCEPT] Tensor forwarded to receiver channel"),
-                        Err(e) => println!("❌ [ACCEPT] Failed to forward tensor: {:?}", e),
+                        Ok(_) => info!("✅ [ACCEPT] Tensor forwarded to receiver channel"),
+                        Err(e) => error!("❌ [ACCEPT] Failed to forward tensor: {:?}", e),
                     }
                 } else {
-                    println!("⚠️ [ACCEPT] No receiver channel available");
+                    warn!("⚠️ [ACCEPT] No receiver channel available");
                 }
             }
             
             // Someone sent us an error message
             TensorMessage::Error { message } => {
-                println!("❌ [ACCEPT] Received ERROR from peer: {}", message);
+                warn!("❌ [ACCEPT] Received ERROR from peer: {}", message);
                 warn!("Received error from peer: {}", message);
             }
         }
 
-        println!("⏳ [ACCEPT] Waiting for connection to close...");
+        debug!("⏳ [ACCEPT] Waiting for connection to close...");
         // Wait for the connection to close gracefully
         connection.closed().await;
-        println!("🔒 [ACCEPT] Connection closed gracefully");
+        info!("🔒 [ACCEPT] Connection closed gracefully");
         Ok(())
     }
 }
@@ -494,24 +506,24 @@ impl TensorNode {
     // Constructor - creates a new TensorNode (like building a new office)
     #[uniffi::constructor]
     pub fn new(_storage_path: Option<String>) -> Self {
-        println!("🏗️ [NEW] Creating new TensorNode...");
+        info!("🏗️ [NEW] Creating new TensorNode...");
         // Create the protocol handler
         let handler = Arc::new(TensorProtocolHandler::new());
         
-        println!("🏗️ [NEW] Creating receiver channel...");
+        info!("🏗️ [NEW] Creating receiver channel...");
         // Create a channel for receiving tensors
         // tx = transmitter (sender), rx = receiver
         let (tx, rx) = mpsc::unbounded_channel();
         handler.set_receiver(tx);
 
         // Create the connection pool
-        println!("🏗️ [NEW] Creating connection pool...");
+        info!("🏗️ [NEW] Creating connection pool...");
         let connection_pool = Arc::new(ConnectionPool::new(
             10, // max number of connections to maintain
             Duration::from_secs(300)));  //make sure the nodes stay on atleast for 5 minutes
 
         
-        println!("✅ [NEW] TensorNode created successfully");
+        info!("✅ [NEW] TensorNode created successfully");
 
         Self {
             // We use Arc<Mutex<Option<>>> for thread-safe lazy initialization
@@ -527,10 +539,11 @@ impl TensorNode {
     // Starts the tensor node (like "opening for business")
     #[uniffi::method(async_runtime = "tokio")]
     pub async fn start(&self) -> Result<(), TensorError> {
-        println!("🚀 [START] Starting tensor node...");
+        init_tracing(); // to only capture errors and ditch everything else
+        info!("🚀 [START] Starting tensor node...");
         info!("Starting tensor node...");
 
-        println!("🔧 [START] Creating endpoint builder...");
+        info!("🔧 [START] Creating endpoint builder...");
         // Create the network endpoint using Iroh's builder pattern
         // This is like setting up our network connection and getting a phone number
         let endpoint_result = Endpoint::builder()
@@ -538,33 +551,33 @@ impl TensorNode {
             .bind()          // Actually create and bind the endpoint
             .await;
             
-        println!("🔧 [START] Endpoint builder result: {:?}", endpoint_result.is_ok());
+        info!("🔧 [START] Endpoint builder result: {:?}", endpoint_result.is_ok());
         
         let endpoint = endpoint_result.map_err(|e: BindError| {
-            println!("❌ [START] Endpoint bind error: {}", e);
+            error!("❌ [START] Endpoint bind error: {}", e);
             TensorError::Connection { message: e.to_string() }
         })?;
         
-        println!("✅ [START] Endpoint created successfully");
+        info!("✅ [START] Endpoint created successfully");
 
-        println!("🔧 [START] Creating router...");
+        info!("🔧 [START] Creating router...");
         // Create a router that will handle incoming connections
         // This is like hiring a receptionist to answer calls
         let router = Router::builder(endpoint.clone())
             .accept(TENSOR_ALPN, self.handler.clone())  // Accept connections for our protocol
             .spawn();  // Start the router in the background
             
-        println!("✅ [START] Router created and spawned");
+        info!("✅ [START] Router created and spawned");
 
-        println!("🔧 [START] Storing endpoint and router...");
+        info!("🔧 [START] Storing endpoint and router...");
         // Store the endpoint and router using interior mutability
         // This is thread-safe because of the Arc<Mutex<>>
         *self.endpoint.lock().unwrap() = Some(endpoint);
         *self.router.lock().unwrap() = Some(router);
         
-        println!("✅ [START] Endpoint and router stored successfully");
+        info!("✅ [START] Endpoint and router stored successfully");
 
-        println!("🎉 [START] Tensor node started successfully");
+        info!("🎉 [START] Tensor node started successfully");
         info!("Tensor node started successfully");
         Ok(())
     }
@@ -577,44 +590,44 @@ impl TensorNode {
         tensor_name: String,    // A name for the tensor
         tensor: TensorData,     // The actual tensor data
     ) -> Result<(), TensorError> {
-        println!("📤 [SEND] Sending tensor '{}' to {} (size: {} bytes)", tensor_name, peer_addr, tensor.data.len());
+        info!("📤 [SEND] Sending tensor '{}' to {} (size: {} bytes)", tensor_name, peer_addr, tensor.data.len());
         
-        // println!("🔒 [SEND] Acquiring endpoint lock...");
+        info!("🔒 [SEND] Acquiring endpoint lock...");
         // Get our endpoint (make sure we're started)
         let endpoint = {
             let endpoint_guard = self.endpoint.lock().unwrap();
-            // println!("🔒 [SEND] Endpoint lock acquired");
+            info!("🔒 [SEND] Endpoint lock acquired");
             
             endpoint_guard.as_ref()
                 .ok_or_else(|| {
-                    println!("❌ [SEND] Endpoint is None - node not started");
+                    error!("❌ [SEND] Endpoint is None - node not started");
                     TensorError::Protocol { message: "Node not started".to_string() }
                 })?
                 .clone()
         };
         
-        // println!("✅ [SEND] Endpoint acquired successfully");
+        // info!("✅ [SEND] Endpoint acquired successfully");
 
         debug!("Sending tensor '{}' to {}", tensor_name, peer_addr);
 
-        println!("🔍 [SEND] Parsing peer NodeTicket: {}", peer_addr);
+        info!("🔍 [SEND] Parsing peer NodeTicket: {}", peer_addr);
         // ✅ FIX: Parse as NodeTicket instead of expecting a specific format
         // This automatically handles both relay URLs and direct addresses
         let ticket: NodeTicket = peer_addr.parse().map_err(|e| {
-            println!("❌ [SEND] Failed to parse NodeTicket: {:?}", e);
+            error!("❌ [SEND] Failed to parse NodeTicket: {:?}", e);
             e
         })?;
         let node_addr: NodeAddr = ticket.into();
         
-        println!("✅ [SEND] NodeTicket parsed successfully");
-        // println!("🔍 [SEND] Peer node_id: {}", node_addr.node_id.fmt_short());
-        // println!("🔍 [SEND] Peer relay_url: {:?}", node_addr.relay_url);
-        // println!("🔍 [SEND] Peer direct_addresses: {} found", node_addr.direct_addresses.len());
+        info!("✅ [SEND] NodeTicket parsed successfully");
+        // info!("🔍 [SEND] Peer node_id: {}", node_addr.node_id.fmt_short());
+        // info!("🔍 [SEND] Peer relay_url: {:?}", node_addr.relay_url);
+        // info!("🔍 [SEND] Peer direct_addresses: {} found", node_addr.direct_addresses.len());
 
         // Connect to the peer
         // Iroh will automatically try both relay and direct addresses
         // Get connection from pool
-        println!("🔗 [SEND] Getting Peer From the existing pool (if it exists)... ");
+        info!("🔗 [SEND] Getting Peer From the existing pool (if it exists)... ");
         let peer_id = node_addr.node_id.to_string();
         // let connection = {
         //     let mut pool = self.connection_pool.read().await; // get the connection pool in an async way
@@ -625,57 +638,57 @@ impl TensorNode {
 
         // let connection = endpoint.connect(node_addr, TENSOR_ALPN).await
         //     .map_err(|e: ConnectError| {
-        //         println!("❌ [SEND] Connection failed: {}", e);
+        //         error!("❌ [SEND] Connection failed: {}", e);
         //         TensorError::Connection { message: e.to_string() }
         //     })?;
         
-        println!("✅ [SEND] Connected to peer successfully");
+        info!("✅ [SEND] Connected to peer successfully");
 
-        println!("📡 [SEND] Opening bidirectional stream...");
+        info!("📡 [SEND] Opening bidirectional stream...");
         // Open a bidirectional stream (like opening a two-way conversation)
         let (mut send, mut _recv) = connection.open_bi().await.map_err(|e| {
-            println!("❌ [SEND] Failed to open bidirectional stream: {:?}", e);
+            error!("❌ [SEND] Failed to open bidirectional stream: {:?}", e);
             TensorError::Connection { message: e.to_string() }
         })?;
         
-        println!("✅ [SEND] Bidirectional stream opened");
+        info!("✅ [SEND] Bidirectional stream opened");
 
-        // println!("📦 [SEND] Creating message...");
+        // info!("📦 [SEND] Creating message...");
         // Create a message containing our tensor
         let message = TensorMessage::Response {
             tensor_name: tensor_name.clone(),
             data: tensor,
         };
 
-        println!("🗜️ [SEND] Serializing message with postcard...");
+        info!("🗜️ [SEND] Serializing message with postcard...");
         // Convert the message to bytes using postcard (pack it in an envelope)
         let message_bytes = postcard::to_allocvec(&message).map_err(|e| {
-            println!("❌ [SEND] Serialization failed: {:?}", e);
+            error!("❌ [SEND] Serialization failed: {:?}", e);
             e
         })?;
         
-        println!("✅ [SEND] Message serialized successfully (size: {} bytes)", message_bytes.len());
+        info!("✅ [SEND] Message serialized successfully (size: {} bytes)", message_bytes.len());
         
         // Check if we need chunking
         if message_bytes.len() > CHUNK_SIZE {
-            println!("📤 [SEND] Using chunked protocol for {} bytes (threshold: {})", message_bytes.len(), CHUNK_SIZE);
+            info!("📤 [SEND] Using chunked protocol for {} bytes (threshold: {})", message_bytes.len(), CHUNK_SIZE);
             send_chunked_message(&mut send, &message_bytes).await?;
         } else {
-            println!("📤 [SEND] Using length-prefixed protocol for {} bytes", message_bytes.len());
+            info!("📤 [SEND] Using length-prefixed protocol for {} bytes", message_bytes.len());
             send_length_prefixed_message(&mut send, &message_bytes).await?;
         }
         
-        println!("🏁 [SEND] Finishing send stream...");
+        info!("🏁 [SEND] Finishing send stream...");
         send.finish().map_err(|e| {
-            println!("❌ [SEND] Failed to finish send stream: {}", e);
+            error!("❌ [SEND] Failed to finish send stream: {}", e);
             TensorError::Connection { message: e.to_string() }
         })?;
         
         // tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // println!("⏳ [SEND] Waiting for connection to close gracefully...");
+        // info!("⏳ [SEND] Waiting for connection to close gracefully...");
         // connection.closed().await;
-        // println!("🔒 [SEND] Connection closed gracefully");
+        // info!("🔒 [SEND] Connection closed gracefully");
         
         // Return connection to pool instead of dropping it
         // {
@@ -687,7 +700,7 @@ impl TensorNode {
         self.connection_pool.return_connection(&peer_id).await;
 
 
-        println!("🎉 [SEND] Tensor '{}' sent successfully", tensor_name);
+        info!("🎉 [SEND] Tensor '{}' sent successfully", tensor_name);
         debug!("Tensor '{}' sent successfully", tensor_name);
         Ok(())
     }
@@ -695,34 +708,34 @@ impl TensorNode {
     // Checks if we've received any tensors from other peers (like checking the mailbox)
     #[uniffi::method(async_runtime = "tokio")]
     pub async fn receive_tensor(&self) -> Result<Option<TensorData>, TensorError> {
-        println!("📬 [RECEIVE] Checking for received tensors...");
+        info!("📬 [RECEIVE] Checking for received tensors...");
         
-        // println!("🔒 [RECEIVE] Acquiring receiver lock...");
+        // info!("🔒 [RECEIVE] Acquiring receiver lock...");
         let mut receiver_guard = self.receiver_rx.lock().unwrap();
-        // println!("🔒 [RECEIVE] Receiver lock acquired");
+        // info!("🔒 [RECEIVE] Receiver lock acquired");
         
         if let Some(rx) = receiver_guard.as_mut() {
-            println!("✅ [RECEIVE] Receiver channel found, trying to receive...");
+            info!("✅ [RECEIVE] Receiver channel found, trying to receive...");
             match rx.try_recv() {
                 // We got a tensor!
                 Ok((peer_id, tensor_name, tensor_data)) => {
-                    println!("🎉 [RECEIVE] Received tensor '{}' from {} (size: {} bytes)", tensor_name, peer_id, tensor_data.data.len());
+                    // info!("🎉 [RECEIVE] Received tensor '{}' from {} (size: {} bytes)", tensor_name, peer_id, tensor_data.data.len());
                     debug!("Received tensor '{}' from {}", tensor_name, peer_id);
                     Ok(Some(tensor_data))
                 }
                 // No tensors waiting
                 Err(mpsc::error::TryRecvError::Empty) => {
-                    println!("📭 [RECEIVE] No tensors waiting");
+                    // info!("📭 [RECEIVE] No tensors waiting");
                     Ok(None)
                 }
                 // The channel is broken
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    println!("❌ [RECEIVE] Receiver channel disconnected");
+                    error!("❌ [RECEIVE] Receiver channel disconnected");
                     Err(TensorError::Protocol { message: "Receiver disconnected".to_string() })
                 }
             }
         } else {
-            println!("❌ [RECEIVE] No receiver channel - node not started");
+            error!("❌ [RECEIVE] No receiver channel - node not started");
             Err(TensorError::Protocol { message: "Node not started".to_string() })
         }
     }
@@ -730,49 +743,49 @@ impl TensorNode {
     // Gets our node's address so others can connect to us (like getting our phone number)
     #[uniffi::method(async_runtime = "tokio")]
     pub async fn get_node_addr(&self) -> Result<String, TensorError> {
-        println!("📞 [GET_ADDR] Getting node address...");
+        info!("📞 [GET_ADDR] Getting node address...");
         
-        println!("🔒 [GET_ADDR] Acquiring endpoint lock...");
+        info!("🔒 [GET_ADDR] Acquiring endpoint lock...");
         let endpoint = {
             let endpoint_guard = self.endpoint.lock().unwrap();
-            println!("🔒 [GET_ADDR] Endpoint lock acquired");
+            info!("🔒 [GET_ADDR] Endpoint lock acquired");
             
             let endpoint_ref = endpoint_guard.as_ref()
                 .ok_or_else(|| {
-                    println!("❌ [GET_ADDR] Endpoint is None - node not started");
+                    error!("❌ [GET_ADDR] Endpoint is None - node not started");
                     TensorError::Protocol {
                         message: "Node not started".into(),
                     }
                 })?;
-            println!("✅ [GET_ADDR] Endpoint found, cloning...");
+            info!("✅ [GET_ADDR] Endpoint found, cloning...");
             endpoint_ref.clone()
         };
         
-        println!("🔍 [GET_ADDR] Calling endpoint.node_addr().initialized()...");
+        info!("🔍 [GET_ADDR] Calling endpoint.node_addr().initialized()...");
         // Wait for our address to be initialized by the discovery system
         let result = endpoint.node_addr().initialized().await
             .map_err(|err| {
-                println!("❌ [GET_ADDR] Discovery watcher error: {:?}", err);
+                error!("❌ [GET_ADDR] Discovery watcher error: {:?}", err);
                 TensorError::Protocol { message: "Discovery watcher error".into() }
             })?;
         
-        println!("✅ [GET_ADDR] Got initialized result: {:?}", result);
-        // println!("🔍 [GET_ADDR] Checking addresses...");
-        // println!("🔍 [GET_ADDR] relay_url is_some: {}", result.relay_url.is_some());
-        // println!("🔍 [GET_ADDR] direct_addresses count: {}", result.direct_addresses.len());
+        info!("✅ [GET_ADDR] Got initialized result: {:?}", result);
+        // info!("🔍 [GET_ADDR] Checking addresses...");
+        // info!("🔍 [GET_ADDR] relay_url is_some: {}", result.relay_url.is_some());
+        // info!("🔍 [GET_ADDR] direct_addresses count: {}", result.direct_addresses.len());
         
         if let Some(ref relay_url) = result.relay_url {
-            println!("✅ [GET_ADDR] Found relay_url: {:?}", relay_url);
+            info!("✅ [GET_ADDR] Found relay_url: {:?}", relay_url);
         }
         
         for (i, direct_addr) in result.direct_addresses.iter().enumerate() {
-            println!("✅ [GET_ADDR] Direct address {}: {}", i, direct_addr);
+            info!("✅ [GET_ADDR] Direct address {}: {}", i, direct_addr);
         }
         
         // ✅ FIX: Create a proper NodeTicket with ALL address info (relay + direct)
         // This works whether we have relay servers, direct addresses, or both!
         if result.relay_url.is_none() && result.direct_addresses.is_empty() {
-            println!("❌ [GET_ADDR] No addressing information available");
+            error!("❌ [GET_ADDR] No addressing information available");
             return Err(TensorError::Protocol { 
                 message: "No relay URL or direct addresses available".into() 
             });
@@ -782,48 +795,48 @@ impl TensorNode {
         let node_ticket = NodeTicket::new(result);
         let ticket_string = node_ticket.to_string();
         
-        println!("🎉 [GET_ADDR] Created NodeTicket: {}", ticket_string);
+        error!("🎉 [GET_ADDR] Created NodeTicket: {}", ticket_string);
         Ok(ticket_string)
     }
 
     // Stores a tensor locally so others can request it (like putting something in storage)
     #[uniffi::method]
     pub fn register_tensor(&self, name: String, tensor: TensorData) -> Result<(), TensorError> {
-        println!("📋 [REGISTER] Registering tensor '{}' (size: {} bytes)", name, tensor.data.len());
-        println!("📋 [REGISTER] Tensor metadata: shape={:?}, dtype={}, requires_grad={}", 
+        info!("📋 [REGISTER] Registering tensor '{}' (size: {} bytes)", name, tensor.data.len());
+        info!("📋 [REGISTER] Tensor metadata: shape={:?}, dtype={}, requires_grad={}", 
                  tensor.metadata.shape, tensor.metadata.dtype, tensor.metadata.requires_grad);
         
         debug!("Registering tensor: {}", name);
         self.handler.register_tensor(name.clone(), tensor);
         
-        println!("✅ [REGISTER] Tensor '{}' registered successfully", name);
+        info!("✅ [REGISTER] Tensor '{}' registered successfully", name);
         Ok(())
     }
 
     // Shuts down the node (like closing the office)
     #[uniffi::method]
     pub fn shutdown(&self) -> Result<(), TensorError> {
-        println!("🔒 [SHUTDOWN] Shutting down tensor node...");
+        info!("🔒 [SHUTDOWN] Shutting down tensor node...");
         
         // Take and drop the router (stops accepting new connections)
         if let Some(router) = self.router.lock().unwrap().take() {
-            println!("✅ [SHUTDOWN] Router stopped");
+            info!("✅ [SHUTDOWN] Router stopped");
             drop(router);
         }
         
         // Take and drop the endpoint (closes all connections)
         if let Some(endpoint) = self.endpoint.lock().unwrap().take() {
-            println!("✅ [SHUTDOWN] Endpoint closed");
+            info!("✅ [SHUTDOWN] Endpoint closed");
             drop(endpoint);
         }
         
         // Take and drop the receiver channel (closes the channel)
         if let Some(receiver) = self.receiver_rx.lock().unwrap().take() {
-            println!("✅ [SHUTDOWN] Receiver channel closed");
+            info!("✅ [SHUTDOWN] Receiver channel closed");
             drop(receiver);
         }
         
-        println!("🎉 [SHUTDOWN] Tensor node shutdown complete");
+        info!("🎉 [SHUTDOWN] Tensor node shutdown complete");
         Ok(())
     }
 
@@ -879,7 +892,7 @@ async fn send_chunked_message(
     send: &mut iroh::endpoint::SendStream,
     data: &[u8],
 ) -> Result<(), TensorError> {
-    println!("📤 [CHUNKED] Starting chunked send of {} bytes", data.len());
+    info!("📤 [CHUNKED] Starting chunked send of {} bytes", data.len());
     
     // Send number of chunks first (this becomes the message_type)
     let num_chunks = (data.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
@@ -889,18 +902,18 @@ async fn send_chunked_message(
     let total_len = data.len() as u32;
     send.write_all(&total_len.to_le_bytes()).await?;
     
-    println!("📤 [CHUNKED] Sent headers: {} chunks, {} total bytes", num_chunks, total_len);
+    info!("📤 [CHUNKED] Sent headers: {} chunks, {} total bytes", num_chunks, total_len);
     
     // Send each chunk with its size
     for (chunk_idx, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
         let chunk_size = chunk.len() as u32;
         send.write_all(&chunk_size.to_le_bytes()).await?;
         send.write_all(chunk).await?;
-        println!("📤 [CHUNKED] Sent chunk {}/{}: {} bytes", chunk_idx + 1, num_chunks, chunk_size);
+        info!("📤 [CHUNKED] Sent chunk {}/{}: {} bytes", chunk_idx + 1, num_chunks, chunk_size);
     }
     
     // Note: Stream will be finished by the caller
-    println!("📤 [CHUNKED] All chunks sent successfully");
+    info!("📤 [CHUNKED] All chunks sent successfully");
     
     Ok(())
 }
@@ -909,14 +922,14 @@ async fn send_length_prefixed_message(
     send: &mut iroh::endpoint::SendStream,
     data: &[u8],
 ) -> Result<(), TensorError> {
-    println!("📤 [LENGTH_PREFIXED] Sending {} bytes", data.len());
+    info!("📤 [LENGTH_PREFIXED] Sending {} bytes", data.len());
     // Send 0 to indicate non-chunked
     send.write_all(&0u32.to_le_bytes()).await?;
     // Send length
     send.write_all(&(data.len() as u32).to_le_bytes()).await?;
     // Send data
     send.write_all(data).await?;
-    println!("📤 [LENGTH_PREFIXED] Data sent successfully");
+    info!("📤 [LENGTH_PREFIXED] Data sent successfully");
     Ok(())
 }
 
@@ -945,13 +958,13 @@ async fn receive_chunked_message(
     recv: &mut iroh::endpoint::RecvStream,
     num_chunks: u32,
 ) -> Result<Vec<u8>, AcceptError> {
-    println!("📦 [CHUNKED] Reading total length...");
+    info!("📦 [CHUNKED] Reading total length...");
     // Read total length
     let mut total_len_buf = [0u8; 4];
     recv.read_exact(&mut total_len_buf).await.map_err(AcceptError::from_err)?;
     let total_len = u32::from_le_bytes(total_len_buf) as usize;
     
-    println!("📦 [CHUNKED] Total length: {} bytes, {} chunks", total_len, num_chunks);
+    info!("📦 [CHUNKED] Total length: {} bytes, {} chunks", total_len, num_chunks);
     
     if total_len > MAX_MESSAGE_SIZE {
         return Err(AcceptError::from_err(std::io::Error::new(
@@ -964,24 +977,24 @@ async fn receive_chunked_message(
     
     // Read each chunk
     for chunk_idx in 0..num_chunks {
-        println!("📦 [CHUNKED] Reading chunk {}/{}", chunk_idx + 1, num_chunks);
+        info!("📦 [CHUNKED] Reading chunk {}/{}", chunk_idx + 1, num_chunks);
         
         // Read chunk size
         let mut chunk_size_buf = [0u8; 4];
         recv.read_exact(&mut chunk_size_buf).await.map_err(AcceptError::from_err)?;
         let chunk_size = u32::from_le_bytes(chunk_size_buf) as usize;
         
-        println!("📦 [CHUNKED] Chunk {} size: {} bytes", chunk_idx + 1, chunk_size);
+        info!("📦 [CHUNKED] Chunk {} size: {} bytes", chunk_idx + 1, chunk_size);
         
         // Read chunk data
         let mut chunk_data = vec![0u8; chunk_size];
         recv.read_exact(&mut chunk_data).await.map_err(AcceptError::from_err)?;
         data.extend_from_slice(&chunk_data);
         
-        println!("📦 [CHUNKED] Chunk {} read successfully, total so far: {} bytes", chunk_idx + 1, data.len());
+        info!("📦 [CHUNKED] Chunk {} read successfully, total so far: {} bytes", chunk_idx + 1, data.len());
     }
     
-    println!("📦 [CHUNKED] All chunks read successfully! Total: {} bytes", data.len());
+    info!("📦 [CHUNKED] All chunks read successfully! Total: {} bytes", data.len());
     Ok(data)
 } 
 
