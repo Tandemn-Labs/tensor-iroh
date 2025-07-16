@@ -16,7 +16,7 @@ build-backend = "maturin"               # maturin is the backend
 ###############################################################################
 [project]
 name            = "tensor-protocol"
-version         = "0.1.0.dev1"
+version         = "0.1.1.dev1"
 description     = "High-performance PyO3 bindings for tensor-protocol"
 readme          = "README.md"
 requires-python = ">=3.8"
