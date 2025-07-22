@@ -235,7 +235,7 @@ impl PyTensorNode {
 // ---------- module entry ----------
 /// Python module definition for `tensor_protocol`
 #[pymodule]
-fn tensor_protocol(_py: Python, m: &PyModule) -> PyResult<()> {
+fn tensor_iroh(_py: Python, m: &PyModule) -> PyResult<()> {
     // Initialize the Tokio runtime for PyO3 async support (multi-threaded)
     // pyo3_asyncio::tokio::init_multi_thread();
     // Expose PyTensorNode and PyTensorData classes to Python
