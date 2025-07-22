@@ -158,7 +158,7 @@ cp tensor_protocol.py tensor_protocol_py/
 ### PyO3 Bindings (Recommended)
 ```python
 import asyncio
-import tensor_protocol as tp
+import tensor_iroh as tp
 
 async def main():
     # Create nodes (with connection pooling enabled)

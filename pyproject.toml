@@ -15,9 +15,9 @@ build-backend = "maturin"               # maturin is the backend
 # 2. PEP 621 project metadata (what ends up on PyPI)
 ###############################################################################
 [project]
-name            = "tensor-protocol"
-version         = "0.1.1.dev1"
-description     = "High-performance PyO3 bindings for tensor-protocol"
+name            = "tensor_iroh"
+version         = "0.1.1.dev2"
+description     = "High-performance PyO3 bindings for tensor_iroh"
 readme          = "README.md"
 requires-python = ">=3.8"
 license         = { text = "MIT" }
@@ -54,9 +54,9 @@ Repository = "https://github.com/Tandemn-Labs/tensor-iroh"
 features     = ["python"]
 #
 # Name of the extension module inside the wheel.
-#   >>> import tensor_protocol as tp
+#   >>> import tensor_iroh as tp
 #        tp.<functions/objects…>
-module-name  = "tensor_protocol"
+module-name  = "tensor_iroh"
 #
 # You can optionally restrict which files go into the wheel:
 # include = ["src/**", "LICENSE*", "README.md"]
