@@ -1,6 +1,13 @@
 # Tensor Protocol - Direct Streaming Implementation
 
 This is a **direct streaming tensor transfer protocol** built on top of Iroh's QUIC networking stack. Unlike traditional approaches, this implementation streams tensor data directly over QUIC connections for maximum performance with intelligent connection pooling.
+## Installation
+
+You can install the PyO3-based Python bindings directly from PyPI using pip:
+
+`pip install tensor_iroh`
+
+
 
 ## Why This Tensor Protocol is Faster
 
