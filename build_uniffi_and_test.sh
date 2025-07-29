@@ -24,40 +24,40 @@ fi
 
 # Generate Python bindings
 echo "Generating Python bindings..."
-uniffi-bindgen generate src/tensor_protocol.udl --language python --out-dir .
+uniffi-bindgen generate src/tensor_iroh.udl --language python --out-dir .
 # Create Python package structure
 echo "Setting up Python package..."
-mkdir -p tensor_protocol_py
-cp tensor_protocol.py tensor_protocol_py/
+mkdir -p tensor_iroh_py
+cp tensor_iroh.py tensor_iroh_py/
 
 # ------------------------------------------------------------------
 # Copy + rename the compiled dynamic library so that UniFFI-Python
-# can find it under the name it expects:  libuniffi_tensor_protocol.*
+# can find it under the name it expects:  libuniffi_tensor_iroh.*
 # ------------------------------------------------------------------
 echo "Copying dynamic library for Python…"
 case "$(uname -s)" in
     Linux*)
         cp target/release/libtensor_protocol.so \
-           tensor_protocol_py/libuniffi_tensor_protocol.so
+           tensor_iroh_py/libuniffi_tensor_iroh.so
         ;;
     Darwin*)
         cp target/release/libtensor_protocol.dylib \
-           tensor_protocol_py/libuniffi_tensor_protocol.dylib
+           tensor_iroh_py/libuniffi_tensor_iroh.dylib
         ;;
     MINGW*|MSYS*|CYGWIN*)
         cp target/release/tensor_protocol.dll \
-           tensor_protocol_py/uniffi_tensor_protocol.dll
+           tensor_iroh_py/uniffi_tensor_iroh.dll
         ;;
     *)
         echo "Unsupported platform"; exit 1;;
 esac
 
 # Create __init__.py
-cat > tensor_protocol_py/__init__.py << 'EOF'
+cat > tensor_iroh_py/__init__.py << 'EOF'
 """
-Tensor Protocol - Direct streaming tensor transfer over Iroh
+Tensor Iroh - Direct streaming tensor transfer over Iroh
 """
-from .tensor_protocol import *
+from .tensor_iroh import *
 
 __version__ = "0.1.0"
 EOF
@@ -67,11 +67,11 @@ echo "Installing Python dependencies..."
 pip install numpy
 
 # Add the package to Python path for testing
-export PYTHONPATH="$PWD/tensor_protocol_py:$PYTHONPATH"
+export PYTHONPATH="$PWD/tensor_iroh_py:$PYTHONPATH"
 
 echo "=== Build Complete ==="
-echo "Files in tensor_protocol_py:"
-ls -la tensor_protocol_py/
+echo "Files in tensor_iroh_py:"
+ls -la tensor_iroh_py/
 echo ""
 echo "To test, run: python test_tensor_protocol_uniffi.py"
-echo "Or run: PYTHONPATH=./tensor_protocol_py python test_tensor_protocol_uniffi.py" 
+echo "Or run: PYTHONPATH=./tensor_iroh_py python test_tensor_protocol_uniffi.py" 

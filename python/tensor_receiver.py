@@ -10,7 +10,7 @@ a full round-trip measurement.
 """
 
 import asyncio, sys, time
-import tensor_protocol as tp
+import tensor_iroh as tp
 
 # ───── helpers ──────────────────────────────────────────────────────────
 def parse_ping(td: tp.PyTensorData) -> tuple[str, bytes]:

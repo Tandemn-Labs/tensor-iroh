@@ -1,6 +1,6 @@
 [package]
-name = "tensor-protocol"
-version = "0.1.1-dev2"
+name = "tensor-iroh"
+version = "0.1.1-dev3"
 edition = "2021"
 
 [lib]

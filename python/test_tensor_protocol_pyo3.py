@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Tensor-Protocol integration test-bench (PyO3 edition)
+Tensor-Iroh integration test-bench (PyO3 edition)
 =====================================================
 
-* Uses the `tensor_protocol` PyO3 module you just compiled.
+* Uses the `tensor_iroh` PyO3 module you just compiled.
 * Exercises the same scenarios as the old UniFFI test-bench:
   ◦ basic send/receive
   ◦ large-tensor path
@@ -15,7 +15,7 @@ import asyncio, struct, random, math, logging
 from typing import Optional, Tuple, List
 
 # ──────────── import PyO3 bindings ────────────
-import tensor_protocol as tp          # the Rust module
+import tensor_iroh as tp          # the Rust module
 TensorNode      = tp.PyTensorNode    # alias for brevity
 PyTensorData    = tp.PyTensorData
 
@@ -99,7 +99,8 @@ async def smoke_direct() -> bool:
 
     for _ in range(50):
         if (r := await n2.receive_tensor()):
-            ok = td_equal(td, r)
+            name, data = r  # Unpack the tuple
+            ok = td_equal(td, data)  # Compare with data, not the tuple
             n1.shutdown(); n2.shutdown()
             return ok
         await asyncio.sleep(0.05)
@@ -119,7 +120,8 @@ async def smoke_large() -> bool:
 
     for _ in range(400):
         if (r := await n2.receive_tensor()):
-            ok = td_equal(td, r)
+            name, data = r  # Unpack the tuple
+            ok = td_equal(td, data)  # Compare with data, not the tuple
             n1.shutdown(); n2.shutdown()
             return ok
         await asyncio.sleep(0.05)
@@ -153,7 +155,8 @@ async def torch_direct() -> bool:
 
     for _ in range(50):
         if (r := await n2.receive_tensor()):
-            same = torch.allclose(t, td_to_torch(r))
+            name, data = r  # Unpack the tuple
+            same = torch.allclose(t, td_to_torch(data))  # Use data, not the tuple
             n1.shutdown(); n2.shutdown()
             return same
         await asyncio.sleep(0.05)
@@ -178,10 +181,50 @@ async def torch_large() -> bool:
 
     for _ in range(400):
         if (r := await n2.receive_tensor()):
-            same = torch.allclose(t, td_to_torch(r))
+            name, data = r  # Unpack the tuple
+            same = torch.allclose(t, td_to_torch(data))  # Use data, not the tuple
             n1.shutdown(); n2.shutdown()
             return same
         await asyncio.sleep(0.025)
+
+    n1.shutdown(); n2.shutdown()
+    return False
+
+
+async def test_tensor_name_return() -> bool:
+    """Test that tensor names are properly returned when receiving tensors."""
+    n1, n2 = TensorNode(), TensorNode()
+    await n1.start(); await n2.start()
+    addr2 = await n2.get_node_addr()
+
+    # Create test tensor
+    td = make_td(shape=(2, 3), randomish=True)
+    
+    # Send tensor with specific name
+    test_name = "my_test_tensor_123"
+    await n1.send_tensor(addr2, test_name, td)
+
+    # Try to receive tensor
+    for _ in range(50):
+        result = await n2.receive_tensor()
+        if result is not None:
+            # Check if we get a tuple (name, data) or just data
+            if isinstance(result, tuple) and len(result) == 2:
+                name, data = result
+                # Verify the name matches what we sent
+                if name == test_name and td_equal(td, data):
+                    n1.shutdown(); n2.shutdown()
+                    return True
+                else:
+                    print(f"❌ Name mismatch: expected '{test_name}', got '{name}'")
+                    n1.shutdown(); n2.shutdown()
+                    return False
+            else:
+                # Old behavior - just data, no name
+                print("❌ Old behavior detected: receive_tensor() returns only data, not (name, data)")
+                n1.shutdown(); n2.shutdown()
+                return False
+        await asyncio.sleep(0.05)
 
     n1.shutdown(); n2.shutdown()
     return False
@@ -195,6 +238,7 @@ async def main() -> None:
         ("Large bytes tensor", smoke_large),
         ("Direct torch tensor", torch_direct),
         ("Large torch tensor", torch_large),
+        ("Tensor name return", test_tensor_name_return),
     ]
 
     passed = 0

@@ -8,7 +8,7 @@ Example:
 """
 
 import asyncio, argparse, secrets, statistics, time
-import tensor_protocol as tp
+import tensor_iroh as tp
 
 HEADER_TEMPLATE = b"ADDR:%b\n"      # %b → sender ticket as bytes
 

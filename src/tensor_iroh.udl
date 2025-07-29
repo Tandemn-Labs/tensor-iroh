@@ -1,4 +1,4 @@
-namespace tensor_protocol {
+namespace tensor_iroh {
   TensorNode create_node(string? storage_path);
 };
 
@@ -21,6 +21,11 @@ dictionary TensorData {
   bytes data;
 };
 
+dictionary ReceivedTensor {
+  string name;
+  TensorData data;
+};
+
 interface TensorNode {
   constructor(string? storage_path);
   
@@ -31,7 +36,7 @@ interface TensorNode {
   void send_tensor_direct(string peer_addr, string tensor_name, TensorData tensor);
   
   [Async, Throws=TensorError]
-  TensorData? receive_tensor();
+  ReceivedTensor? receive_tensor();
   
   [Async, Throws=TensorError]
   string get_node_addr();
@@ -41,6 +46,9 @@ interface TensorNode {
   
   [Throws=TensorError]
   void shutdown();
+  
+  [Async, Throws=TensorError]
+  u64 get_pool_size();
 };
 
 callback interface TensorReceiveCallback {

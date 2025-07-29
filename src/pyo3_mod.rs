@@ -196,14 +196,18 @@ impl PyTensorNode {
     }
 
     /// Receive a tensor (async, returns awaitable)
-    /// Returns Some(PyTensorData) if a tensor is received, or None.
+    /// Returns Some((name, PyTensorData)) if a tensor is received, or None.
     fn receive_tensor<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
         let inner = self.inner.clone();
         future_into_py(py, async move {
             match inner.receive_tensor().await {
-                Ok(Some(t)) => Ok(Some(PyTensorData { inner: t })),
-                Ok(None)    => Ok(None),
-                Err(e)      => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())),
+                Ok(Some(received)) => {
+                    // Return a tuple of (name, PyTensorData)
+                    let py_tensor = PyTensorData { inner: received.data };
+                    Ok(Some((received.name, py_tensor)))
+                },
+                Ok(None) => Ok(None),
+                Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())),
             }
         })
     }
@@ -233,7 +237,7 @@ impl PyTensorNode {
     /// Only available if compiled with the "torch" feature.
 
 // ---------- module entry ----------
-/// Python module definition for `tensor_protocol`
+/// Python module definition for `tensor_iroh`
 #[pymodule]
 fn tensor_iroh(_py: Python, m: &PyModule) -> PyResult<()> {
     // Initialize the Tokio runtime for PyO3 async support (multi-threaded)

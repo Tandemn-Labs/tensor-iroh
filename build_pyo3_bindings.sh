@@ -20,7 +20,6 @@ maturin build --release -F "python,torch" --out ./target/wheels
 
 echo "✅ PyO3 wheel (with torch support) built & installed in your active venv."
 echo " Try in Python:"
-echo "     PYTHONPATH=./tensor_protocol_py:$PYTHONPATH"
-echo "     import tensor_protocol"
+echo "     import tensor_iroh"
 
 echo "=== (3) Done ==="

@@ -175,6 +175,13 @@ pub struct TensorData {
     pub data: Vec<u8>,            // The actual tensor data as raw bytes
 }
 
+// Add the new ReceivedTensor struct after TensorData
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ReceivedTensor {
+    pub name: String,
+    pub data: TensorData,
+}
+
 // ============================================================================
 // CONNECTION POOL - A simple implementation of a connection pool
 // ============================================================================
@@ -707,7 +714,7 @@ impl TensorNode {
 
     // Checks if we've received any tensors from other peers (like checking the mailbox)
     #[uniffi::method(async_runtime = "tokio")]
-    pub async fn receive_tensor(&self) -> Result<Option<TensorData>, TensorError> {
+    pub async fn receive_tensor(&self) -> Result<Option<ReceivedTensor>, TensorError> {
         info!("📬 [RECEIVE] Checking for received tensors...");
         
         // info!("🔒 [RECEIVE] Acquiring receiver lock...");
@@ -719,9 +726,13 @@ impl TensorNode {
             match rx.try_recv() {
                 // We got a tensor!
                 Ok((peer_id, tensor_name, tensor_data)) => {
-                    // info!("🎉 [RECEIVE] Received tensor '{}' from {} (size: {} bytes)", tensor_name, peer_id, tensor_data.data.len());
+                    info!("🎉 [RECEIVE] Received tensor '{}' from {} (size: {} bytes)", 
+                        tensor_name, peer_id, tensor_data.data.len());
                     debug!("Received tensor '{}' from {}", tensor_name, peer_id);
-                    Ok(Some(tensor_data))
+                    Ok(Some(ReceivedTensor {
+                        name: tensor_name,
+                        data: tensor_data,
+                    }))
                 }
                 // No tensors waiting
                 Err(mpsc::error::TryRecvError::Empty) => {
