@@ -41,10 +41,10 @@ async def ping_once(
 async def main() -> None:
     ap = argparse.ArgumentParser(description="Tensor-RTT benchmark")
     ap.add_argument("receiver", help="NodeTicket of remote reflector")
-    ap.add_argument("--size", type=int, default=4096,
-                    help="payload bytes (default 4 KiB)")
-    ap.add_argument("--count", type=int, default=50,
-                    help="number of pings (default 50)")
+    ap.add_argument("--size", type=int, default=65536,
+                    help="payload bytes (default 64 KiB)")
+    ap.add_argument("--count", type=int, default=1000,
+                    help="number of pings (default 1000)")
     args = ap.parse_args()
 
     node = tp.PyTensorNode()
