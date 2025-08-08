@@ -30,7 +30,7 @@ def parse_ping(td: tp.PyTensorData) -> tuple[str, bytes]:
 
 
 def build_pong(payload: bytes) -> tp.PyTensorData:
-    return tp.PyTensorData(payload, [len(payload)], "uint8", False)
+    return tp.PyTensorData(payload, [len(payload)], "float16", False)
 
 
 # ───── main loop ────────────────────────────────────────────────────────
