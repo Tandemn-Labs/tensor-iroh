@@ -7,8 +7,6 @@ You can install the PyO3-based Python bindings directly from PyPI using pip:
 
 `pip install tensor_iroh`
 
-
-
 ## Why This Tensor Protocol is Faster
 
 ### **1. Direct QUIC Streaming vs Traditional Approaches**
