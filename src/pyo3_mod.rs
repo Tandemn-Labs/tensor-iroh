@@ -212,6 +212,21 @@ impl PyTensorNode {
         })
     }
 
+    /// Wait for the next tensor (async, returns awaitable, no busy-polling)
+    /// Returns (name, PyTensorData) when a tensor arrives.
+    fn wait_for_tensor<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
+        let inner = self.inner.clone();
+        future_into_py(py, async move {
+            match inner.wait_for_tensor().await {
+                Ok(received) => {
+                    let py_tensor = PyTensorData { inner: received.data };
+                    Ok((received.name, py_tensor))
+                },
+                Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())),
+            }
+        })
+    }
+
     /// Shut down the node (cleanup resources)
     fn shutdown(&self) -> PyResult<()> {
         self.inner.shutdown().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
