@@ -15,7 +15,7 @@ import tensor_iroh as tp
 # ───── helpers ──────────────────────────────────────────────────────────
 def parse_ping(td: tp.PyTensorData) -> tuple[str, bytes]:
     """
-    Tensor layout:  b'ADDR:<sender_ticket>\\n' + payload
+    Tensor layout:  b'ADDR:<sender_ticket>\n' + payload
     Returns (sender_ticket, payload_bytes)
     """
     raw = td.as_bytes()
@@ -39,14 +39,10 @@ async def main() -> None:
     await node.start()
     my_addr = await node.get_node_addr()
     print(f"🏁 Reflector ready – give this to your sender:\n{my_addr}\n", flush=True)
-    time.sleep(10) 
+    await asyncio.sleep(0.2)  # let discovery settle without blocking the event loop
 
     while True:
-        td = await node.receive_tensor()
-        if td is None:
-            await asyncio.sleep(0.0001)
-            continue
-
+        name, td = await node.wait_for_tensor()
         sender_addr, payload = parse_ping(td)
         pong = build_pong(payload)               # echo identical bytes
         # name can be constant – Response message carries data directly
