@@ -23,6 +23,7 @@ You can install the PyO3-based Python bindings directly from PyPI using pip:
 ### **3. Zero-Copy Design**
 - **Memory Efficiency**: Tensors stream directly without intermediate buffers
 - **Reduced GC Pressure**: Minimal Python object creation during transfer
+- **Low-Jitter Receive**: Awaitable, non-polling receive path avoids busy-loop sleeps and reduces event-loop jitter
 
 ## Key Features
 
@@ -31,6 +32,7 @@ You can install the PyO3-based Python bindings directly from PyPI using pip:
 - **Zero-Copy Design**: Minimal data copying for efficient memory usage
 - **Dual Python Bindings**: Both PyO3 (high-performance) and UniFFI (stable) options
 - **Async/Await Support**: Full async support for non-blocking operations
+- **Async Receive without Polling**: `await node.wait_for_tensor()` yields the next tensor as soon as it arrives
 - **Security**: TLS 1.3 encryption by default
 
 ## Architecture
@@ -97,6 +99,7 @@ enum TensorMessage {
 - **Thread Safety**: Uses `tokio::sync::AsyncMutex` for async-aware locking
 - **Connection Limits**: Maximum 10 concurrent connections per node
 - **Smart Reuse**: Connections are marked idle and reused for subsequent sends
+- **Async Receiver**: The internal receive queue is protected by an async-aware lock and supports true async waiting (no polling)
 
 ## Performance Comparison
 
@@ -106,7 +109,6 @@ enum TensorMessage {
 | **Memory** | Stores data on disk | Streams directly with pooling |
 | **Complexity** | Request→Store→Download | Single stream transfer |
 | **Scalability** | Limited by storage | Limited by network + connection pool |
-| **Use Case** | Large, persistent data | Real-time ML inference |
 | **Performance** | Network + storage overhead | Optimized for repeated sends |
 | **Connection Reuse** | None | Intelligent pooling (5min idle) |
 | **Setup Overhead** | Per-request | Once per peer |
@@ -197,10 +199,9 @@ async def main():
     pool_size = await sender.pool_size()
     print(f"Connection pool size: {pool_size}")
     
-    # Receive tensor
-    received = await receiver.receive_tensor()
-    if received:
-        print(f"Received tensor shape: {received.shape}")
+    # Receive tensor without polling: wait for next tensor
+    name, received_td = await receiver.wait_for_tensor()
+    print(f"Received tensor '{name}' with shape: {received_td.shape}")
     
     # Cleanup
     sender.shutdown()
@@ -264,6 +265,7 @@ asyncio.run(main())
 - **Connection reuse**: ~100-500ms saved per subsequent send to same peer
 - **Throughput**: Optimized by connection pooling
 - **Memory usage**: Minimal buffering, streaming design with intelligent pooling
+- **Stable Latency**: Awaitable receive avoids busy-polling jitter in Python event loops
 
 ## Comprehensive Testing
 
@@ -296,6 +298,7 @@ The protocol includes comprehensive error handling:
 ## Thread Safety
 
 - **Async-aware locking**: Uses `tokio::sync::AsyncMutex` for connection pool
+- **Async-aware receiver**: Internal receiver channel is protected by an async lock and supports `recv().await`
 - **Non-blocking operations**: All async operations are non-blocking
 - **Concurrent access**: Multiple threads can safely access the connection pool
 - **Resource management**: Automatic cleanup of idle connections
