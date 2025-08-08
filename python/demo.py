@@ -34,7 +34,14 @@ async def main():
     # Receive tensor
     received = await receiver.receive_tensor()
     if received:
-        print(f"Received tensor shape: {received.shape}")
+        name, td = received  # receive_tensor() returns (name, PyTensorData)
+        print(f"Received tensor '{name}' with shape: {td.shape}")
+    
+    # Receive second tensor
+    received2 = await receiver.receive_tensor()
+    if received2:
+        name, td = received2  # receive_tensor() returns (name, PyTensorData)
+        print(f"Received tensor '{name}' with shape: {td.shape}")
     
     # Cleanup
     sender.shutdown()

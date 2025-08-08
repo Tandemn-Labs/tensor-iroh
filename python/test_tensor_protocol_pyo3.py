@@ -138,6 +138,60 @@ async def smoke_address() -> bool:
     return addr.startswith("node")
 
 
+async def test_multiple_64kb_tensors() -> bool:
+    """Test sending 20 64KB tensors repeatedly."""
+    n1, n2 = TensorNode(), TensorNode()
+    await n1.start(); await n2.start()
+    addr2 = await n2.get_node_addr()
+
+    # Create 20 different 64KB tensors (16384 float32 values = 64KB)
+    tensors = []
+    for i in range(20):
+        # Create a 128x128 float32 tensor (16384 elements = 64KB)
+        td = make_td(shape=(128, 128), randomish=True)
+        tensors.append((f"tensor_{i}", td))
+
+    # Send all 20 tensors
+    for name, td in tensors:
+        await n1.send_tensor(addr2, name, td)
+
+    # Receive all 20 tensors and verify
+    received_tensors = {}
+    for _ in range(1000):  # Give plenty of time for all tensors
+        result = await n2.receive_tensor()
+        if result is not None:
+            name, data = result
+            received_tensors[name] = data
+            
+            # Check if we've received all 20 tensors
+            if len(received_tensors) == 20:
+                break
+        await asyncio.sleep(0.01)
+
+    # Verify we received all 20 tensors with correct data
+    if len(received_tensors) != 20:
+        print(f"❌ Expected 20 tensors, received {len(received_tensors)}")
+        n1.shutdown(); n2.shutdown()
+        return False
+
+    # Verify each tensor matches what we sent
+    for original_name, original_td in tensors:
+        if original_name not in received_tensors:
+            print(f"❌ Missing tensor: {original_name}")
+            n1.shutdown(); n2.shutdown()
+            return False
+        
+        received_td = received_tensors[original_name]
+        if not td_equal(original_td, received_td):
+            print(f"❌ Tensor data mismatch for: {original_name}")
+            n1.shutdown(); n2.shutdown()
+            return False
+
+    print(f"✅ Successfully sent and received all 20 64KB tensors")
+    n1.shutdown(); n2.shutdown()
+    return True
+
+
 # ───────────── Torch tests (optional) ─────────────
 async def torch_direct() -> bool:
     if not _HAS_TORCH:
@@ -236,6 +290,7 @@ async def main() -> None:
         ("Node addressing", smoke_address),
         ("Direct bytes tensor", smoke_direct),
         ("Large bytes tensor", smoke_large),
+        ("Multiple 64KB tensors", test_multiple_64kb_tensors),
         ("Direct torch tensor", torch_direct),
         ("Large torch tensor", torch_large),
         ("Tensor name return", test_tensor_name_return),
