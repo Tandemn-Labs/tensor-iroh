@@ -56,7 +56,7 @@ uniffi::setup_scaffolding!();
 // This is like a "protocol ID" - it tells other computers what kind of data we're sending
 // Think of it like saying "I speak Tensor Protocol version 0" when connecting
 const TENSOR_ALPN: &[u8] = b"tensor-iroh/direct/0";
-const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks (this is for the larger tensors)
+const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks to avoid excessive chunking for small messages
 const MAX_MESSAGE_SIZE: usize = 100 * 1024 * 1024; // 100MB total limit
 
 
@@ -218,55 +218,51 @@ impl ConnectionPool {
         }
     }
 
-    async fn get_connection(&self, peer_id: &str, endpoint: &Endpoint,node_addr: &NodeAddr)-> Result<Connection, TensorError>{
-        // check if we ALREADY have a connection to this peer or not
-        // async-aware lock
-        let mut conns = self.connections.lock().await;
-         // fast-path: reuse if still warm
-        if let Some(pc) = conns.get_mut(peer_id) {
-            let is_idle     = *pc.is_idle.lock().unwrap(); // use unwrap here, becuase we are not using tokio mutex 
-            let last_used = *pc.last_used.lock().unwrap(); // use unwrap here, becuase we are not using tokio mutex 
-            if !is_idle && last_used.elapsed() < self.max_idle_time {
-                *pc.last_used.lock().unwrap() = Instant::now();
-                return Ok(pc.connections.clone());
+    async fn get_connection(&self, peer_id: &str, endpoint: &Endpoint, node_addr: &NodeAddr) -> Result<Connection, TensorError> {
+        // Fast-path: try to reuse an existing, still-fresh connection
+        {
+            let mut conns = self.connections.lock().await;
+            if let Some(pc) = conns.get_mut(peer_id) {
+                let elapsed_since_last_use = pc.last_used.lock().unwrap().elapsed();
+                if elapsed_since_last_use < self.max_idle_time {
+                    // Mark busy again and update last used
+                    *pc.is_idle.lock().unwrap() = false;
+                    *pc.last_used.lock().unwrap() = Instant::now();
+                    return Ok(pc.connections.clone());
+                } else {
+                    // Stale entry; remove so we create a fresh connection below
+                    conns.remove(peer_id);
+                }
             }
         }
 
-        // slow-path: create new, store, and return
-        // let connection = endpoint.connect(node_addr, TENSOR_ALPN).await?;
-        let connection = endpoint.connect(node_addr.clone(), TENSOR_ALPN).await.map_err(|e| TensorError::Connection { message: e.to_string() })?;
-        conns.insert(
-            peer_id.to_string(),
-            PooledConnection {
-                connections: connection.clone(),
-                last_used: Arc::new(Mutex::new(Instant::now())),
-                is_idle:   Arc::new(Mutex::new(false)),
-            },
-        );
-        // if let Some(connection) = self.connection.get_mul(peer_id){
-        //     if !pooled_conn.is_idle && pooled_conn.last_used.elapsed() < self.max_idle_time{
-        //         // that means that the connection is still valid and you should use it
-        //         *pooled_conn.last_used.lock().unwrap() = Instant::now(); // doubt here - why is the *needed? is it same as C++ *? 
-        //         return Ok(pooled_conn.connections); // check if clone is needed or not
-        //     }
-        // }
+        // Slow-path: create new connection without holding the pool lock
+        let connection = endpoint
+            .connect(node_addr.clone(), TENSOR_ALPN)
+            .await
+            .map_err(|e| TensorError::Connection { message: e.to_string() })?;
 
-        // // if we don't have a connection to this peer, we need to create a new one
-        // let connection = endpoint.connect(node_addr, TENSOR_ALPN).await?;
-        // // and then put it in the (existing) Pool of all the connections
-        // self.connections.lock().unwrap().insert(peer_id.to_string(), PooledConnection {
-        //     connections: connection,
-        //     last_used: Arc::new(Mutex::new(Instant::now())),
-        //     is_idle: Arc::new(Mutex::new(false)),
-        // });
+        // Insert into pool as busy (not idle) and update last_used
+        {
+            let mut conns = self.connections.lock().await;
+            conns.insert(
+                peer_id.to_string(),
+                PooledConnection {
+                    connections: connection.clone(),
+                    last_used: Arc::new(Mutex::new(Instant::now())),
+                    is_idle: Arc::new(Mutex::new(false)),
+                },
+            );
+        }
+
         Ok(connection)
     }
-
+    
     // Returns a connection to the pool when it's no longer needed
     // This allows the connection to be reused by other operations
     // async fn return_connection(&self, peer_id: &str) {
     //     if let Some(pooled_conn) = self.connections.lock().unwrap().get(peer_id) {
-    //         // Mark the connection as idle so it can be reused
+        // Mark the connection as idle so it can be reused
     //         *pooled_conn.is_idle.lock().unwrap() = true;
     //         // Update the last used time
     //         *pooled_conn.last_used.lock().unwrap() = Instant::now();
@@ -365,119 +361,127 @@ impl ProtocolHandler for TensorProtocolHandler {
         // Get the ID of who's connecting to us
         let peer_id_result = connection.remote_node_id();
         info!("🚪 [ACCEPT] Incoming connection...");
-        
+
         let peer_id = peer_id_result?.to_string();
         info!("🚪 [ACCEPT] Connection from peer: {}", peer_id);
         debug!("Accepted tensor connection from {}", peer_id);
 
-        debug!("📡 [ACCEPT] Setting up bidirectional stream...");
-        // Set up a two-way communication channel
-        // send = for sending data to the peer, recv = for receiving data from the peer
-        let (mut send, mut recv) = connection.accept_bi().await?;
-        info!("✅ [ACCEPT] Bidirectional stream established");
-
-        debug!("📥 [ACCEPT] Reading incoming message (chunked protocol)...");
-        // Read message type (0 = single, >0 = chunked)
-        let mut type_buf = [0u8; 4];
-        recv.read_exact(&mut type_buf).await.map_err(AcceptError::from_err)?;
-        let message_type = u32::from_le_bytes(type_buf);
-        
-        let request_bytes = if message_type == 0 {
-            // Single message
-            debug!("📥 [ACCEPT] Reading single message...");
-            receive_length_prefixed_message(&mut recv).await?
-        } else {
-            // Chunked message
-            debug!("📥 [ACCEPT] Reading chunked message ({} chunks)...", message_type);
-            receive_chunked_message(&mut recv, message_type).await?
-        };
-        debug!("✅ [ACCEPT] Read {} bytes from peer", request_bytes.len());
-        
-        debug!("🗜️ [ACCEPT] Deserializing message with postcard...");
-        // Convert the raw bytes back into a TensorMessage using postcard
-        // This is like opening an envelope and reading the letter inside
-        // this part is GOOD for control plane (not much bytes)
-        let message: TensorMessage = postcard::from_bytes(&request_bytes)
-            .map_err(|e| {
-                error!("❌ [ACCEPT] Deserialization failed: {:?}", e);
-                AcceptError::from_err(e)
-            })?;
-        debug!("✅ [ACCEPT] Message deserialized successfully");
-
-        // Handle different types of messages
-        match message {
-            // Someone is asking us for a tensor
-            TensorMessage::Request { tensor_name } => {
-                info!("📥 [ACCEPT] Received REQUEST for tensor: {}", tensor_name);
-                debug!("Received request for tensor: {}", tensor_name);
-
-                debug!("🔍 [ACCEPT] Looking up tensor in storage...");
-                // Look up the tensor in our storage
-                let response = {
-                    let store = self.tensor_store.lock().unwrap();
-                    match store.get(&tensor_name) {
-                        // We have the tensor - send it back
-                        Some(tensor_data) => {
-                            info!("✅ [ACCEPT] Found tensor '{}' (size: {} bytes)", tensor_name, tensor_data.data.len());
-                            TensorMessage::Response {
-                                tensor_name: tensor_name.clone(),
-                                data: tensor_data.clone(),
-                            }
-                        }
-                        // We don't have the tensor - send an error
-                        None => {
-                            warn!("❌ [ACCEPT] Tensor '{}' not found", tensor_name);
-                            TensorMessage::Error {
-                                message: format!("Tensor '{}' not found", tensor_name),
-                            }
-                        }
-                    }
-                };
-
-                debug!("🗜️ [ACCEPT] Serializing response...");
-                // Convert our response back to bytes using postcard
-                let response_bytes = postcard::to_allocvec(&response)
-                    .map_err(|e| {
-                        error!("❌ [ACCEPT] Response serialization failed: {:?}", e);
-                        AcceptError::from_err(e)
-                    })?;
-                
-                debug!("📤 [ACCEPT] Sending response ({} bytes)...", response_bytes.len());
-                // Send the response back to the peer
-                send.write_all(&response_bytes).await.map_err(AcceptError::from_err)?;
-                send.finish().map_err(AcceptError::from_err)?;
-                info!("✅ [ACCEPT] Response sent successfully");
-            }
-            
-            // Someone is sending us a tensor (unsolicited)
-            TensorMessage::Response { tensor_name, data } => {
-                info!("📥 [ACCEPT] Received RESPONSE with tensor: {} (size: {} bytes)", tensor_name, data.data.len());
-                debug!("Received tensor data: {}", tensor_name);
-                
-                debug!("📨 [ACCEPT] Forwarding tensor to receiver channel...");
-                // If we have a receiver channel set up, forward the tensor to the main application
-                if let Some(tx) = self.receiver_tx.lock().unwrap().as_ref() {
-                    let send_result = tx.send((peer_id.clone(), tensor_name.clone(), data));
-                    match send_result {
-                        Ok(_) => info!("✅ [ACCEPT] Tensor forwarded to receiver channel"),
-                        Err(e) => error!("❌ [ACCEPT] Failed to forward tensor: {:?}", e),
-                    }
-                } else {
-                    warn!("⚠️ [ACCEPT] No receiver channel available");
+        // Process multiple streams on this single QUIC connection
+        loop {
+            debug!("📡 [ACCEPT] Waiting for next bidirectional stream...");
+            let (mut send, mut recv) = match connection.accept_bi().await {
+                Ok(pair) => {
+                    info!("✅ [ACCEPT] Bidirectional stream established");
+                    pair
                 }
-            }
-            
-            // Someone sent us an error message
-            TensorMessage::Error { message } => {
-                warn!("❌ [ACCEPT] Received ERROR from peer: {}", message);
-                warn!("Received error from peer: {}", message);
+                Err(e) => {
+                    // Connection closed or errored; end handler
+                    info!("🔒 [ACCEPT] Connection closed or no more streams: {:?}", e);
+                    break;
+                }
+            };
+
+            debug!("📥 [ACCEPT] Reading incoming message (chunked protocol)...");
+            // Read message type (0 = single, >0 = chunked)
+            let mut type_buf = [0u8; 4];
+            recv.read_exact(&mut type_buf).await.map_err(AcceptError::from_err)?;
+            let message_type = u32::from_le_bytes(type_buf);
+
+            let request_bytes = if message_type == 0 {
+                // Single message
+                debug!("📥 [ACCEPT] Reading single message...");
+                receive_length_prefixed_message(&mut recv).await?
+            } else {
+                // Chunked message
+                debug!("📥 [ACCEPT] Reading chunked message ({} chunks)...", message_type);
+                receive_chunked_message(&mut recv, message_type).await?
+            };
+            debug!("✅ [ACCEPT] Read {} bytes from peer", request_bytes.len());
+
+            debug!("🗜️ [ACCEPT] Deserializing message with postcard...");
+            // Convert the raw bytes back into a TensorMessage using postcard
+            let message: TensorMessage = postcard::from_bytes(&request_bytes)
+                .map_err(|e| {
+                    error!("❌ [ACCEPT] Deserialization failed: {:?}", e);
+                    AcceptError::from_err(e)
+                })?;
+            debug!("✅ [ACCEPT] Message deserialized successfully");
+
+            // Handle different types of messages
+            match message {
+                // Someone is asking us for a tensor
+                TensorMessage::Request { tensor_name } => {
+                    info!("📥 [ACCEPT] Received REQUEST for tensor: {}", tensor_name);
+                    debug!("Received request for tensor: {}", tensor_name);
+
+                    debug!("🔍 [ACCEPT] Looking up tensor in storage...");
+                    // Look up the tensor in our storage
+                    let response = {
+                        let store = self.tensor_store.lock().unwrap();
+                        match store.get(&tensor_name) {
+                            // We have the tensor - send it back
+                            Some(tensor_data) => {
+                                info!("✅ [ACCEPT] Found tensor '{}' (size: {} bytes)", tensor_name, tensor_data.data.len());
+                                TensorMessage::Response {
+                                    tensor_name: tensor_name.clone(),
+                                    data: tensor_data.clone(),
+                                }
+                            }
+                            // We don't have the tensor - send an error
+                            None => {
+                                warn!("❌ [ACCEPT] Tensor '{}' not found", tensor_name);
+                                TensorMessage::Error {
+                                    message: format!("Tensor '{}' not found", tensor_name),
+                                }
+                            }
+                        }
+                    };
+
+                    debug!("🗜️ [ACCEPT] Serializing response...");
+                    // Convert our response back to bytes using postcard
+                    let response_bytes = postcard::to_allocvec(&response)
+                        .map_err(|e| {
+                            error!("❌ [ACCEPT] Response serialization failed: {:?}", e);
+                            AcceptError::from_err(e)
+                        })?;
+
+                    debug!("📤 [ACCEPT] Sending response ({} bytes)...", response_bytes.len());
+                    // Send the response back to the peer
+                    send.write_all(&response_bytes).await.map_err(AcceptError::from_err)?;
+                    send.finish().map_err(AcceptError::from_err)?;
+                    info!("✅ [ACCEPT] Response sent successfully");
+                }
+
+                // Someone is sending us a tensor (unsolicited)
+                TensorMessage::Response { tensor_name, data } => {
+                    info!("📥 [ACCEPT] Received RESPONSE with tensor: {} (size: {} bytes)", tensor_name, data.data.len());
+                    debug!("Received tensor data: {}", tensor_name);
+
+                    debug!("📨 [ACCEPT] Forwarding tensor to receiver channel...");
+                    // If we have a receiver channel set up, forward the tensor to the main application
+                    if let Some(tx) = self.receiver_tx.lock().unwrap().as_ref() {
+                        let send_result = tx.send((peer_id.clone(), tensor_name.clone(), data));
+                        match send_result {
+                            Ok(_) => info!("✅ [ACCEPT] Tensor forwarded to receiver channel"),
+                            Err(e) => error!("❌ [ACCEPT] Failed to forward tensor: {:?}", e),
+                        }
+                    } else {
+                        warn!("⚠️ [ACCEPT] No receiver channel available");
+                    }
+
+                    // We didn't use our send half; close it to tidy up
+                    let _ = send.finish();
+                }
+
+                // Someone sent us an error message
+                TensorMessage::Error { message } => {
+                    warn!("❌ [ACCEPT] Received ERROR from peer: {}", message);
+                    let _ = send.finish();
+                }
             }
         }
 
-        debug!("⏳ [ACCEPT] Waiting for connection to close...");
-        // Wait for the connection to close gracefully
-        connection.closed().await;
-        info!("🔒 [ACCEPT] Connection closed gracefully");
+        // Done handling this connection
         Ok(())
     }
 }
@@ -500,7 +504,7 @@ pub struct TensorNode {
     handler: Arc<TensorProtocolHandler>,
     
     // Channel for receiving tensors from other peers
-    receiver_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<(String, String, TensorData)>>>>,
+    receiver_rx: Arc<AsyncMutex<Option<mpsc::UnboundedReceiver<(String, String, TensorData)>>>>,
 
     // Adding the connection Pool here so that the TensorNode can use it
     // connection_pool: Arc<RwLock<ConnectionPool>>, // making sure the entire ConnectionPool
@@ -538,7 +542,7 @@ impl TensorNode {
             endpoint: Arc::new(Mutex::new(None)),
             router: Arc::new(Mutex::new(None)),
             handler,
-            receiver_rx: Arc::new(Mutex::new(Some(rx))),
+            receiver_rx: Arc::new(AsyncMutex::new(Some(rx))),
             connection_pool, // send the connection pool to the TensorNode 
         }
     }
@@ -718,7 +722,7 @@ impl TensorNode {
         info!("📬 [RECEIVE] Checking for received tensors...");
         
         // info!("🔒 [RECEIVE] Acquiring receiver lock...");
-        let mut receiver_guard = self.receiver_rx.lock().unwrap();
+        let mut receiver_guard = self.receiver_rx.lock().await;
         // info!("🔒 [RECEIVE] Receiver lock acquired");
         
         if let Some(rx) = receiver_guard.as_mut() {
@@ -741,6 +745,32 @@ impl TensorNode {
                 }
                 // The channel is broken
                 Err(mpsc::error::TryRecvError::Disconnected) => {
+                    error!("❌ [RECEIVE] Receiver channel disconnected");
+                    Err(TensorError::Protocol { message: "Receiver disconnected".to_string() })
+                }
+            }
+        } else {
+            error!("❌ [RECEIVE] No receiver channel - node not started");
+            Err(TensorError::Protocol { message: "Node not started".to_string() })
+        }
+    }
+
+    // Wait for the next tensor (async, no busy-polling)
+    #[uniffi::method(async_runtime = "tokio")]
+    pub async fn wait_for_tensor(&self) -> Result<ReceivedTensor, TensorError> {
+        info!("📬 [RECEIVE] Waiting for next tensor...");
+        let mut receiver_guard = self.receiver_rx.lock().await;
+        if let Some(rx) = receiver_guard.as_mut() {
+            match rx.recv().await {
+                Some((_peer_id, tensor_name, tensor_data)) => {
+                    info!(
+                        "🎉 [RECEIVE] Received tensor '{}' (size: {} bytes)",
+                        tensor_name,
+                        tensor_data.data.len()
+                    );
+                    Ok(ReceivedTensor { name: tensor_name, data: tensor_data })
+                }
+                None => {
                     error!("❌ [RECEIVE] Receiver channel disconnected");
                     Err(TensorError::Protocol { message: "Receiver disconnected".to_string() })
                 }
@@ -842,9 +872,12 @@ impl TensorNode {
         }
         
         // Take and drop the receiver channel (closes the channel)
-        if let Some(receiver) = self.receiver_rx.lock().unwrap().take() {
-            info!("✅ [SHUTDOWN] Receiver channel closed");
-            drop(receiver);
+        {
+            let mut receiver_guard = self.receiver_rx.blocking_lock();
+            if let Some(receiver) = receiver_guard.take() {
+                info!("✅ [SHUTDOWN] Receiver channel closed");
+                drop(receiver);
+            }
         }
         
         info!("🎉 [SHUTDOWN] Tensor node shutdown complete");
