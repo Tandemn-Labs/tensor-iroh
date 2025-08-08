@@ -97,16 +97,10 @@ async def smoke_direct() -> bool:
     n1.register_tensor("t", td)
     await n1.send_tensor(addr2, "t", td)
 
-    for _ in range(50):
-        if (r := await n2.receive_tensor()):
-            name, data = r  # Unpack the tuple
-            ok = td_equal(td, data)  # Compare with data, not the tuple
-            n1.shutdown(); n2.shutdown()
-            return ok
-        await asyncio.sleep(0.05)
-
+    name, data = await n2.wait_for_tensor()
+    ok = td_equal(td, data)
     n1.shutdown(); n2.shutdown()
-    return False
+    return ok
 
 
 async def smoke_large() -> bool:
@@ -118,16 +112,10 @@ async def smoke_large() -> bool:
     n1.register_tensor("big", td)
     await n1.send_tensor(addr2, "big", td)
 
-    for _ in range(400):
-        if (r := await n2.receive_tensor()):
-            name, data = r  # Unpack the tuple
-            ok = td_equal(td, data)  # Compare with data, not the tuple
-            n1.shutdown(); n2.shutdown()
-            return ok
-        await asyncio.sleep(0.05)
-
+    name, data = await n2.wait_for_tensor()
+    ok = td_equal(td, data)
     n1.shutdown(); n2.shutdown()
-    return False
+    return ok
 
 
 async def smoke_address() -> bool:
@@ -158,15 +146,13 @@ async def test_multiple_64kb_tensors() -> bool:
     # Receive all 20 tensors and verify
     received_tensors = {}
     for _ in range(1000):  # Give plenty of time for all tensors
-        result = await n2.receive_tensor()
-        if result is not None:
-            name, data = result
+        try:
+            name, data = await asyncio.wait_for(n2.wait_for_tensor(), timeout=1.0)
             received_tensors[name] = data
-            
-            # Check if we've received all 20 tensors
             if len(received_tensors) == 20:
                 break
-        await asyncio.sleep(0.01)
+        except asyncio.TimeoutError:
+            break
 
     # Verify we received all 20 tensors with correct data
     if len(received_tensors) != 20:
@@ -207,16 +193,10 @@ async def torch_direct() -> bool:
     n1.register_tensor("torch", td)
     await n1.send_tensor(addr2, "torch", td)
 
-    for _ in range(50):
-        if (r := await n2.receive_tensor()):
-            name, data = r  # Unpack the tuple
-            same = torch.allclose(t, td_to_torch(data))  # Use data, not the tuple
-            n1.shutdown(); n2.shutdown()
-            return same
-        await asyncio.sleep(0.05)
-
+    name, data = await n2.wait_for_tensor()
+    same = torch.allclose(t, td_to_torch(data))
     n1.shutdown(); n2.shutdown()
-    return False
+    return same
 
 
 async def torch_large() -> bool:
@@ -233,16 +213,10 @@ async def torch_large() -> bool:
     n1.register_tensor("torch_big", td)
     await n1.send_tensor(addr2, "torch_big", td)
 
-    for _ in range(400):
-        if (r := await n2.receive_tensor()):
-            name, data = r  # Unpack the tuple
-            same = torch.allclose(t, td_to_torch(data))  # Use data, not the tuple
-            n1.shutdown(); n2.shutdown()
-            return same
-        await asyncio.sleep(0.025)
-
+    name, data = await n2.wait_for_tensor()
+    same = torch.allclose(t, td_to_torch(data))
     n1.shutdown(); n2.shutdown()
-    return False
+    return same
 
 
 async def test_tensor_name_return() -> bool:
@@ -258,30 +232,15 @@ async def test_tensor_name_return() -> bool:
     test_name = "my_test_tensor_123"
     await n1.send_tensor(addr2, test_name, td)
 
-    # Try to receive tensor
-    for _ in range(50):
-        result = await n2.receive_tensor()
-        if result is not None:
-            # Check if we get a tuple (name, data) or just data
-            if isinstance(result, tuple) and len(result) == 2:
-                name, data = result
-                # Verify the name matches what we sent
-                if name == test_name and td_equal(td, data):
-                    n1.shutdown(); n2.shutdown()
-                    return True
-                else:
-                    print(f"❌ Name mismatch: expected '{test_name}', got '{name}'")
-                    n1.shutdown(); n2.shutdown()
-                    return False
-            else:
-                # Old behavior - just data, no name
-                print("❌ Old behavior detected: receive_tensor() returns only data, not (name, data)")
-                n1.shutdown(); n2.shutdown()
-                return False
-        await asyncio.sleep(0.05)
-
-    n1.shutdown(); n2.shutdown()
-    return False
+    # Receive tensor (no polling)
+    name, data = await n2.wait_for_tensor()
+    if name == test_name and td_equal(td, data):
+        n1.shutdown(); n2.shutdown()
+        return True
+    else:
+        print(f"❌ Name mismatch: expected '{test_name}', got '{name}'")
+        n1.shutdown(); n2.shutdown()
+        return False
 
 
 # ────────────── test harness ──────────────
