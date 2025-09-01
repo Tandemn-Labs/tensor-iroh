@@ -1,6 +1,6 @@
 [package]
 name = "tensor-iroh"
-version = "0.1.1-alpha.1"
+version = "0.1.1-alpha.2"
 edition = "2021"
 
 [lib]

@@ -57,7 +57,7 @@ uniffi::setup_scaffolding!();
 // Think of it like saying "I speak Tensor Protocol version 0" when connecting
 const TENSOR_ALPN: &[u8] = b"tensor-iroh/direct/0";
 const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks to avoid excessive chunking for small messages
-const MAX_MESSAGE_SIZE: usize = 100 * 1024 * 1024; // 100MB total limit
+const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10GB total limit
 
 // Optimized connection pool settings
 const MAX_CONNECTIONS: usize = 50;  // Increased from 10 for better concurrency
