@@ -61,7 +61,7 @@ const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10GB total limit
 
 // Optimized connection pool settings
 const MAX_CONNECTIONS: usize = 50;  // Increased from 10 for better concurrency
-const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);  // 10 minutes instead of 5
+const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(86400*30);  // 30 days instead of 10 minutes
 
 
 // ============================================================================
